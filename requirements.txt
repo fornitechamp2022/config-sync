@@ -5,4 +5,4 @@ Pillow>=10.0
 edge-tts>=7.0
 PyYAML>=6.0
 vercel>=0.5.0
-indic-transliteration>=3.0
+indic-transliteration>=2.3,<3
