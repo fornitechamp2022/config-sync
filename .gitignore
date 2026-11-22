@@ -33,3 +33,6 @@ service-account*.json
 
 # NOTE: bundled open-source fonts (assets/fonts/*.woff2) are intentionally
 # NOT ignored — the Noto Sans Devanagari OFL fonts are tracked source assets.
+
+.netlify/
+
