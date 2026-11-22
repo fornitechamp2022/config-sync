@@ -24,9 +24,27 @@ We do **not** commit and never have committed:
 
 All generated media is written to ignored local directories (`work/`, `out/`)
 and, in CI, to short-lived GitHub Actions artifacts. Finished MP4s are hosted
-on a public Vercel Blob store with a rolling 7-day cleanup — not in git.
-`.gitignore` explicitly blocks media, logs, temp files, state and local
-credential files from ever being committed.
+on the **Netlify Blob store `reels-media`** — not in git and not in the static
+`public/` folder — with a rolling **7-day cleanup**. GitHub Actions artifacts
+(MP4, manifest and QA dump) are retained for only **2 days**. `.gitignore`
+explicitly blocks media, logs, temp files, state and local credential files
+from ever being committed.
+
+### Hosted-media retention and public access
+
+- The finished MP4 is uploaded with the Netlify CLI to `reels-media` under
+  `reels/<ascii-reel-id>.mp4` and served from the public URL
+  `https://bollywood-reel-generator.netlify.app/r/reels/<ascii-reel-id>.mp4`.
+  A `/r/*` redirect sends requests to a serverless Function that streams the
+  object with HTTP Range support.
+- Anyone with the link can view the MP4 while it exists; it is not indexed as a
+  media library and there is no directory listing. After each successful
+  upload, blobs older than **7 days** are deleted (the just-uploaded object is
+  always protected). Expiry is therefore automatic, not permanent hosting.
+- A Vercel Blob store (`reels-media`) can be used as an optional fallback and
+  applies the same 7-day rolling cleanup; it is not the active host.
+- Local `work/` / `out/` copies are deleted after rendering in CI; the 2-day
+  artifact window exists only for debugging failed runs.
 
 ## How third-party content is used
 
@@ -44,9 +62,11 @@ news-commentary reel**:
   visuals composition — not a repost or a copy of the source article.
 
 We keep only **metadata** about a source: canonical URL, a normalized title
-key, hashes (dedupe/perceptual), timestamps and resulting platform IDs. The
-state ledger (private Netlify Blob, with Vercel Blob/local fallback) holds
-these hashes/URLs/IDs only — never image, audio or video bytes.
+key, hashes (dedupe/perceptual), timestamps, the public `/r/` MP4 URL and
+resulting platform IDs. The state ledger (private Netlify Blob store
+`reel-state`, with Vercel Blob/local fallback) holds these hashes/URLs/IDs only
+— never image, audio or video bytes. Source URLs are also written into each
+manifest and into the platform descriptions.
 
 ## Attribution
 
@@ -72,11 +92,13 @@ We will, on request and at our discretion:
 - add the source domain or URL to `skip_url_patterns` / blocklists so it is no
   longer ingested;
 - remove or expire the relevant metadata record from the state store;
-- remove/expire the reel from hosted storage and request removal from the
-  platform where feasible.
+- delete the MP4 from the Netlify `reels-media` Blob store (or let the 7-day
+  rolling cleanup expire it) so the public `/r/` URL stops serving it, and
+  request removal from YouTube/Instagram where feasible.
 
 Because reference material is used transiently and only metadata is retained,
-removing a source is fast and leaves no media behind in this repository.
+removing a source is fast and leaves no media behind in this repository. Hosted
+MP4s expire within 7 days even without a request, and CI artifacts within 2 days.
 
 ## Fair use / commentary context
 
