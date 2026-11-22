@@ -324,3 +324,142 @@ def test_hindi_drops_whole_sentences_when_translation_long(monkeypatch):
     assert len(hi["sentences"]) < len(en["sentences"])
     assert all(s.endswith("।") for s in hi["sentences"])
     assert "word_count_out_of_range" not in flags(hi, _cfg())
+
+
+# --- iteration 1 acceptance: structure, fragments, flags ---------------------
+
+TARGET_FLAGS = (
+    "truncated_lead", "metadata_leak", "time_relative", "question_headline",
+    "too_few_sentences", "list_like", "low_entity_density",
+)
+
+
+def test_narrative_flow_hook_context_body_cta():
+    cfg = _cfg()
+    en = build_story(_article(), cfg)
+    assert en is not None
+    sentences = en["sentences"]
+    assert sentences[0] == en["hook"]
+    assert sentences[-1].strip().rstrip(".") == "Follow for more Bollywood updates"
+    context = sentences[1]
+    assert len(context.split()) >= 8, "second sentence supplies context"
+    body = sentences[2:-1]
+    assert 2 <= len(body) <= 4, "hook + context + 2-4 body sentences + CTA"
+    assert len(sentences) >= 5
+    for flag in TARGET_FLAGS:
+        assert flag not in flags(en, cfg)
+
+    hi = to_hindi(en, cfg)
+    assert len(hi["sentences"]) >= 5
+    assert hi["sentences"][-1].startswith("अधिक") or hi["sentences"][-1].endswith("।")
+    for flag in TARGET_FLAGS:
+        assert flag not in flags(hi, cfg)
+
+
+def test_fragments_question_stubs_lists_and_repeated_entities_are_dropped():
+    bad = [
+        "Why did Salman Khan exit Bigg Boss 20 in the finale",
+        "Kanika Mann, Qazi Touqeer, Mahhi Vij, Love Gill, Gauahar Khan and ScoutOP "
+        "attended the finale together with Salman Khan.",
+        "Salman Khan praised Salman Khan for the decision after the eviction round ended.",
+        "Photo: Salman Khan and the Bigg Boss 20 eviction stage during the finale.",
+    ]
+    article = _article(extra_paragraphs=bad)
+    en = build_story(article, _cfg())
+    assert en is not None
+    for fragment in bad:
+        assert fragment not in en["script"]
+    assert "?" not in en["script"]
+    assert "list_like" not in flags(en, _cfg())
+
+
+def test_headline_stub_clause_is_not_narrated():
+    article = _article(
+        title="Bigg Boss 20 Weekend Ka Vaar: Kanika Fight In Front Of Salman. Eviction",
+    )
+    en = build_story(article, _cfg())
+    assert en is not None
+    assert "Eviction" not in en["hook"]
+    assert en["hook"].count(".") <= 1
+
+
+def test_new_flags_are_accurate_and_do_not_fire_on_clean_scripts():
+    cfg = _cfg()
+    clean = build_story(_article(), cfg)
+    assert clean is not None
+    found = flags(clean, cfg)
+    assert "list_like" not in found and "low_entity_density" not in found
+
+    listed = (
+        "Salman Khan, Kanika Mann, Qazi Touqeer, Mahhi Vij, Love Gill and "
+        "Gauahar Khan met at the finale after the eviction."
+    )
+    story = {
+        "script": listed, "hook": listed, "sentences": [listed] + BODY[:4],
+        "word_count": 80, "language": "en",
+    }
+    assert "list_like" in flags(story, cfg)
+
+    plain = [
+        "The episode aired late and the viewers discussed the result after the show.",
+        "The producers shared a short note about the task and the final result.",
+        "The audience waited for the announcement and the makers thanked everyone.",
+        "The team reviewed the decisions and the contestants left the house quietly.",
+        "The channel confirmed the schedule and the fans planned to watch again.",
+    ]
+    story = {
+        "script": " ".join(plain), "hook": plain[0], "sentences": plain,
+        "word_count": 85, "language": "en",
+    }
+    assert "low_entity_density" in flags(story, cfg)
+
+
+def test_brand_names_in_hindi_are_not_false_positives():
+    cfg = _cfg()
+    sentences = ["JioHotstar पर बिग बॉस 20 का एपिसोड देखें।"] * 5
+    story = {
+        "script": " ".join(sentences), "hook": sentences[0],
+        "sentences": sentences, "word_count": 40, "language": "hi",
+    }
+    assert "latin_in_hindi" not in flags(story, cfg)
+
+    sentences = ["RandomEnglishWord पर बिग बॉस 20 का एपिसोड देखें।"] * 5
+    story["script"] = " ".join(sentences)
+    story["sentences"] = sentences
+    assert "latin_in_hindi" in flags(story, cfg)
+
+
+def test_in_memory_14_day_audit_meets_every_target():
+    """Offline stand-in for `python pilot.py` with mocked translation."""
+    cfg = _cfg()
+    titles = [
+        "Salman Khan Bigg Boss 20 eviction episode 78",
+        "Salman Khan eviction twist in Bigg Boss 20",
+        "Bigg Boss 20 eviction: Salman Khan announces surprise",
+        "Salman Khan and Kanika Bigg Boss 20 eviction night",
+        "Bigg Boss 20 eviction: Salman Khan reviews the task",
+        "Salman Khan eviction special on Bigg Boss 20",
+    ]
+    sources = ["ABP News", "Indian Express", "Hindustan Times",
+               "India TV News", "Outlook India", "Times Now"]
+    scripts = []
+    for title, source in zip(titles, sources):
+        article = _article(
+            title=title,
+            description=(f"{title} was discussed in the latest episode and "
+                         "the audience shared strong views with the makers."),
+        )
+        article["source"] = source
+        en = build_story(article, cfg)
+        assert en is not None, title
+        hi = to_hindi(en, cfg)
+        for story in (en, hi):
+            found = flags(story, cfg)
+            for flag in TARGET_FLAGS:
+                assert flag not in found, (title, flag, found, story["script"])
+            assert len(story["sentences"]) >= 5
+            assert "?" not in story["script"] and "..." not in story["script"]
+        scripts.append(hi)
+
+    assert len({s["source"] for s in scripts}) >= 4
+    assert all(s["sentences"][-1].endswith("।") for s in scripts)

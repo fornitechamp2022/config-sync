@@ -50,6 +50,26 @@ RELATIVE_TIME = re.compile(
 )
 CAP_NAME = re.compile(r"\b([A-Z][a-z]{2,}(?:\s+[A-Z][a-z]{2,})*)\b")
 NON_PERSON_HINTS = ("bigg", "boss", "bollywood", "weekend", "show", "season", "news")
+QUESTION_START = frozenset({
+    "why", "how", "what", "when", "where", "who", "whom", "whose", "which",
+})
+LIST_START_RE = re.compile(
+    r"^\s*(?:\d+[.)]\s+|[-•*·]\s+|top\s+\d+\b|list\s+of\b|"
+    r"here\s+are\s+\d+\b|\d+\s+(?:things|reasons|ways)\b)",
+    re.I,
+)
+CREDIT_RE = re.compile(
+    r"^\s*(?:photo|image|credit|source|caption|file|pic)\s*[:\-]", re.I
+)
+# Words that mark the actual event of a story, used to order body sentences.
+EVENT_WORDS = (
+    "confirmed", "announced", "exits", "exit", "evicted", "eviction", "wins",
+    "won", "clash", "fight", "task", "captaincy", "finale", "decision",
+)
+BACKGROUND_WORDS = (
+    "reportedly", "rumour", "rumor", "speculation", "social media",
+    "former", "fans", "sources",
+)
 SENTENCE_START_COMMON = {
     "why", "how", "what", "when", "where", "who", "will", "would", "did",
     "does", "do", "is", "are", "was", "were", "has", "have", "had", "the",
@@ -84,12 +104,18 @@ def _punctuate(text: str) -> str:
     return text
 
 
-def _too_similar(a: str, b: str, threshold: float = 0.55) -> bool:
+def _too_similar(a: str, b: str, threshold: float = 0.60) -> bool:
+    """Jaccard overlap; a lead that expands the headline is not a duplicate.
+
+    Containment (intersection / shorter length) used to discard every lead
+    that merely restated its own headline with extra detail, which left the
+    script without a context sentence.
+    """
     sa = set(re.findall(r"[a-z0-9]+", a.lower())) - STOPWORDS
     sb = set(re.findall(r"[a-z0-9]+", b.lower())) - STOPWORDS
     if not sa or not sb:
         return False
-    return len(sa & sb) / min(len(sa), len(sb)) >= threshold
+    return len(sa & sb) / len(sa | sb) >= threshold
 
 
 def _too_similar_hindi(a: str, b: str, threshold: float = 0.86) -> bool:
@@ -167,6 +193,41 @@ def _entity_mentions(
     return sorted(kept)
 
 
+def _is_fragment(text: str) -> bool:
+    """Reject question-shaped, list-shaped and credit-shaped sentences."""
+    core = text.strip()
+    if not core or core.endswith(":") or "|" in core:
+        return True
+    if LIST_START_RE.search(core) or CREDIT_RE.search(core):
+        return True
+    first = re.match(r"[A-Za-z]+", core)
+    # A pure question is never narrated -- even when RSS dropped the '?'.
+    return bool(first and first.group(0).lower() in QUESTION_START)
+
+
+def _is_list_like(text: str) -> bool:
+    """Detect a run of comma-separated names ('A, B, C, D and E were...')."""
+    parts = [p.strip() for p in re.split(r"[,;]", text) if p.strip()]
+    if len(parts) < 5:
+        return False
+    short = [p for p in parts if len(re.findall(r"\w+", p)) <= 4]
+    return len(short) >= 4
+
+
+def _repeats_entity(text: str, anchors: list[tuple[str, str]]) -> bool:
+    """An entity phrase repeated inside one sentence reads like a stub."""
+    counts: dict[str, int] = {}
+    for _start, _end, name, _kind in _entity_mentions(text, anchors):
+        key = name.lower()
+        counts[key] = counts.get(key, 0) + 1
+    return any(value >= 2 for value in counts.values())
+
+
+def _opening(text: str, words: int = 4) -> tuple[str, ...]:
+    """Leading tokens, used to catch a lead that merely echoes the headline."""
+    return tuple(re.findall(r"[a-z0-9]+", text.lower())[:words])
+
+
 def _resolve_pronouns(
     sentence: str,
     anchors: list[tuple[str, str]],
@@ -221,6 +282,12 @@ def _absolute_date(article: dict) -> str:
 def build_story(article: dict, cfg: dict) -> dict | None:
     scfg = cfg["story"]
     headline = _strip_breadcrumbs(article["title"])
+    # Some headlines append a stub after a full stop ("... Fight In Front Of
+    # Salman. Eviction"). Only the first complete clause is a usable hook;
+    # utils.sentence_split drops very short parts, so split explicitly here.
+    parts = [p.strip() for p in re.split(r"(?<=\.)\s+(?=[A-Z])", headline) if p.strip()]
+    if len(parts) > 1 and len(parts[-1].split()) <= 4:
+        headline = parts[0]
     if not headline or _is_metadata(headline):
         return None
 
@@ -273,18 +340,22 @@ def build_story(article: dict, cfg: dict) -> dict | None:
             return None
         # Spoken reels are statements; a question in the headline/lead/body is
         # simply not narrated (a headline '?' never becomes a spoken hook).
-        if "?" in sentence:
+        if "?" in sentence or _is_fragment(sentence) or _is_list_like(sentence):
             return None
         resolved = _resolve_pronouns(sentence, anchors, headline_persons)
         if not resolved or len(resolved) < 30:
             return None
+        if _repeats_entity(resolved, anchors):
+            return None
+        opening = _opening(resolved)
+        if opening and any(_opening(prior) == opening for prior in seen):
+            return None  # do not echo the hook's/lead's opening phrase
         if any(_too_similar(resolved, prior) for prior in seen):
             return None
         return resolved
 
     seen: list[str] = []
-    headline_ok = (prepare(headline_clean, seen)
-                   if "?" not in headline_clean else None)
+    headline_ok = prepare(headline_clean, seen)
     if headline_ok:
         seen.append(headline_ok)
     lead_ok = prepare(lead, seen) if lead else None
@@ -296,6 +367,26 @@ def build_story(article: dict, cfg: dict) -> dict | None:
         if prepared:
             body_ok.append(prepared)
             seen.append(prepared)
+
+    def narrative_score(sentence: str) -> int:
+        """Event sentences first, then background; ties keep source order.
+
+        A stable sort means sentences of equal importance stay in the order the
+        publisher told them, which is the closest thing to chronology we have
+        without inventing dates.
+        """
+        low = sentence.lower()
+        mentioned = {name.lower() for _s, _e, name, _kind
+                     in _entity_mentions(sentence, anchors)}
+        score = len(mentioned & {e.lower() for e in entities})
+        if any(word in low for word in EVENT_WORDS):
+            score += 2
+        if any(word in low for word in BACKGROUND_WORDS):
+            score -= 1
+        return score
+
+    # Stable sort: importance desc, publication order as the tie-breaker.
+    body_ok.sort(key=narrative_score, reverse=True)
 
     if headline_ok:
         hook, lead_sentence = headline_ok, lead_ok
@@ -318,15 +409,23 @@ def build_story(article: dict, cfg: dict) -> dict | None:
     # Choose a whole-sentence prefix closest to the target band. Larger
     # prefixes add sentences; smaller prefixes drop trailing ones -- never a
     # partial sentence.
+    # A news brief is hook + context + 2-4 body sentences + CTA. Only fall back
+    # to a longer body when four sentences cannot reach the word floor.
+    cap = len(body_ok)
+    if word_count(" ".join(base + body_ok[:4] + [cta])) >= min_words - 10:
+        cap = 4
+
     best: tuple[int, list[str], int] | None = None
-    for k in range(len(body_ok) + 1):
+    for k in range(cap + 1):
         candidate = base + body_ok[:k] + [cta]
         count = word_count(" ".join(candidate))
         if count > upper:
             break
         if len(candidate) < required_sentences:
             continue
-        score = abs(count - target)
+        # A tight hook + context + 2-4 body + CTA reads as a story, not a
+        # listicle. Prefer that shape when it still hits the word target.
+        score = abs(count - target) - (3 if 2 <= k <= 4 else 0)
         if best is None or score < best[0]:
             best = (score, candidate, count)
     if best is None or best[2] < min_words - 15:

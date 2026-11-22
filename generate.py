@@ -35,7 +35,7 @@ from pipeline.sources import discover
 from pipeline.state import State
 from pipeline.story import build_story, to_hindi
 from pipeline.utils import load_config, run, slugify, similarity, ensure_dir, tokens
-from pipeline.voice import synthesize, synthesize_natural
+from pipeline.voice import synthesize, synthesize_natural, VoiceSynthesisError
 
 DEFAULT_CLI = r"C:\Users\MASHU\.agents\skills\hyperframes\scripts\plugin-cli.mjs"
 
@@ -317,10 +317,22 @@ def main() -> int:
 
         # Hindi words from synthesize_natural are already Hinglish — never
         # replace caption tokens with the story's transliterated token list.
-        if story.get("language") == "hi":
-            voice = synthesize_natural(story, cfg, workdir)
-        else:
-            voice = synthesize(story, cfg, workdir)
+        try:
+            if story.get("language") == "hi":
+                voice = synthesize_natural(story, cfg, workdir)
+            else:
+                voice = synthesize(story, cfg, workdir)
+        except VoiceSynthesisError as exc:
+            # A transient TTS outage must skip one story, not fail the run.
+            print(f"[skip] TTS unavailable for {story['headline'][:50]}: {exc}")
+            state.record_run({
+                "outcome": "rejected", "reason": "tts_unavailable",
+                "articles": {article["url_key"]: {
+                    "title": story["headline"], "title_key": article.get("title_key", ""),
+                    "source": story["source"], "status": "rejected", "reasons": ["tts_unavailable"],
+                }},
+            })
+            continue
         captions = group_words(voice["words"], cfg)
         write_captions(captions, workdir)
         write_debug_dump(item, cfg, voice, captions, out_root, manifest["id"])

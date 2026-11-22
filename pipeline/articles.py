@@ -1,4 +1,9 @@
-"""Article fetch, extraction and the no-LLM quality gate."""
+"""Article fetch, extraction and the no-LLM quality gate.
+
+Only coherent body prose is allowed into the script pool. Related-story rails,
+"also read" blocks, hashtags, photo credits and breadcrumb tails are common in
+Indian entertainment pages and would otherwise leak into narration.
+"""
 from __future__ import annotations
 
 import re
@@ -7,7 +12,7 @@ from urllib.parse import urljoin
 import requests
 from bs4 import BeautifulSoup
 
-from .utils import clean_text, title_tokens, canonical_url
+from .utils import clean_text, sentence_split, title_tokens, canonical_url
 
 UA = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -17,12 +22,95 @@ BAD_IMG = (
     "notification", "addr-bar", "arrow", "lock", "subscribe", "logo", "icon",
     "tracker", "google", "cross", "avatar", "sprite", "placeholder", "ads",
     "figma.site", "figma.com", "doubleclick", "googlesyndication", "adservice",
-    "banner", "creative", "newsletter",
+    "banner", "creative", "newsletter", "related", "comment", "share",
+    "whatsapp", "telegram", "email", "promo", "widget", "breadcrumb",
 )
+
 BAD_PARA = (
-    "photo credit", "read more", "also read", "also watch", "follow us",
-    "subscribe", "advertisement", "click here", "copyright", "all rights reserved",
+    "photo credit", "image credit", "photo courtesy", "image courtesy",
+    "read more", "also read", "also watch", "watch more", "related story",
+    "related stories", "related news", "trending now", "top news",
+    "must read", "editor's pick", "follow us", "follow @", "subscribe",
+    "sign up", "newsletter", "advertisement", "advertorial", "sponsored",
+    "click here", "copyright", "all rights reserved", "terms of use",
+    "privacy policy", "story continues", "for more updates", "table of contents",
+    "press trust of india", "pti ", "ians ", "live updates", "fact check",
 )
+
+# Container hints: whole blocks that never hold article prose.
+BLOCK_HINTS = (
+    "related", "recommend", "trending", "also-read", "read-more",
+    "newsletter", "social", "comments", "advert", "promo", "widget",
+    "sidebar", "breadcrumb", "share", "tags", "footer", "masthead",
+    "modal", "popup", "overlay", "more-stories",
+)
+
+# Inline tails that sometimes sit at the end of an otherwise good paragraph.
+_TAIL_RE = re.compile(
+    r"\s*(?:\||—|\s-\s)\s*(?:read\s+more|also\s+read|also\s+watch|watch\s+more|"
+    r"follow\s+us|photo\s+credit|image\s+credit|via\s+@?\w+|"
+    r"[A-Z][\w.&' -]{2,40}(?:\s+TV|\s+News|\s+Desk|\s+Bureau))\s*$",
+    re.I,
+)
+_LEAD_RE = re.compile(
+    r"^\s*(?:also\s+read|also\s+watch|read\s+more|watch\s+more|related\s+story|"
+    r"related\s+stories|trending\s+now|top\s+news|must\s+read|"
+    r"(?:photo|image)\s+(?:credit|courtesy))\s*[:\-|]\s*",
+    re.I,
+)
+_LIST_START_RE = re.compile(
+    r"^\s*(?:\d+[.)]\s+|[-•*·]\s+|top\s+\d+\b|list\s+of\b|"
+    r"here\s+are\s+\d+\b|\d+\s+(?:things|reasons|ways)\b)",
+    re.I,
+)
+
+
+def _strip_inline(text: str) -> str:
+    """Remove breadcrumbs, hashtags and credit tails from a paragraph."""
+    text = clean_text(text)
+    text = _LEAD_RE.sub("", text)
+    text = _TAIL_RE.sub("", text)
+    text = re.sub(r"#[A-Za-z0-9_]+", " ", text)          # hashtags
+    text = re.sub(r"\b(?:photo|image)\s+credit\s*[:\-].*$", " ", text, flags=re.I)
+    text = re.sub(r"\s+[|]\s*[A-Z][\w &'.-]{2,40}\s*$", " ", text)  # "| Source"
+    text = re.sub(r"\s+", " ", text).strip(" \t-–—|")
+    return text
+
+
+def _coherent_paragraph(text: str) -> bool:
+    """Reject listicle fragments, captions and one-line blurbs."""
+    if len(text) < 55 or len(text.split()) < 11:
+        return False
+    if _LIST_START_RE.search(text):
+        return False
+    if text.count("|") >= 2 or text.count("#") >= 1:
+        return False
+    sentences = [s for s in sentence_split(text) if len(s.split()) >= 6]
+    # A paragraph made mostly of stubs ("Kanika. Gullu. Mahhi.") is a list,
+    # not narration, even when the concatenated character count looks fine.
+    if len(sentences) < 1:
+        return False
+    fragments = sum(1 for s in sentence_split(text) if len(s.split()) < 6)
+    if fragments >= 3 and fragments > len(sentences):
+        return False
+    return True
+
+
+def _remove_blocks(soup: BeautifulSoup) -> None:
+    """Decompose pages' related/trending/social containers before parsing."""
+    doomed = []
+    for tag in soup.find_all(True):
+        blob = " ".join(filter(None, [
+            " ".join(tag.get("class", []) if isinstance(tag.get("class"), list)
+                     else [str(tag.get("class") or "")]),
+            str(tag.get("id") or ""),
+            str(tag.get("role") or ""),
+        ])).lower()
+        if any(hint in blob for hint in BLOCK_HINTS):
+            doomed.append(tag)
+    for tag in doomed:
+        if tag.parent is not None:
+            tag.decompose()
 
 
 def fetch_article(url: str, cfg: dict, candidate: dict | None = None) -> dict | None:
@@ -36,13 +124,14 @@ def fetch_article(url: str, cfg: dict, candidate: dict | None = None) -> dict | 
 
     for tag in soup(["script", "style", "nav", "header", "footer", "aside", "form"]):
         tag.decompose()
+    _remove_blocks(soup)
 
-    paragraphs = []
-    for p in soup.find_all("p"):
-        text = clean_text(p.get_text(" "))
-        if len(text) < 45:
+    paragraphs: list[str] = []
+    for node in soup.find_all(["p", "li"]):
+        text = _strip_inline(node.get_text(" "))
+        if not text or any(b in text.lower() for b in BAD_PARA):
             continue
-        if any(b in text.lower() for b in BAD_PARA):
+        if not _coherent_paragraph(text):
             continue
         if text not in paragraphs:
             paragraphs.append(text)
@@ -94,7 +183,7 @@ def fetch_article(url: str, cfg: dict, candidate: dict | None = None) -> dict | 
         "url_key": (candidate or {}).get("url_key", canonical_url(url)),
         "title_key": (candidate or {}).get("title_key", ""),
         "source": (candidate or {}).get("source", ""),
-        "description": clean_text((candidate or {}).get("description", "")),
+        "description": _strip_inline((candidate or {}).get("description", "")),
         "published": (candidate or {}).get("published", ""),
         "paragraphs": paragraphs,
         "body": body,
@@ -105,13 +194,30 @@ def fetch_article(url: str, cfg: dict, candidate: dict | None = None) -> dict | 
     }
 
 
-def enrich_and_gate(candidates: list[dict], cfg: dict, limit: int = 24) -> list[dict]:
+def article_quality(article: dict, cfg: dict) -> float:
+    """Post-fetch score: preferred outlet, real article length, image count."""
     preferred = {s.lower() for s in cfg["topic"].get("preferred_sources", [])}
-    ordered = sorted(candidates, key=lambda c: c.get("published", ""), reverse=True)
-    ordered.sort(key=lambda c: c.get("source", "").lower() not in preferred)
-    results = []
-    for cand in ordered[:limit]:
+    source = (article.get("source") or "").lower()
+    bonus = 3.0 if any(p in source or source in p for p in preferred) else 0.0
+    length = min(len(article.get("body", "")) / 500.0, 2.0)
+    images = min(len(article.get("images", [])) / 3.0, 1.5)
+    return round(bonus + length + images, 3)
+
+
+def enrich_and_gate(candidates: list[dict], cfg: dict, limit: int = 24) -> list[dict]:
+    ordered = sorted(candidates,
+                     key=lambda c: (c.get("quality", 0.0), c.get("published", "")),
+                     reverse=True)
+    # Fetch a modest pool, then keep the genuinely best articles rather than
+    # letting an early, mediocre candidate occupy a slot.
+    fetch_cap = min(len(ordered), max(limit * 2, 40))
+    accepted: list[dict] = []
+    for cand in ordered[:fetch_cap]:
         article = fetch_article(cand["url"], cfg, cand)
         if article and article["accepted"]:
-            results.append(article)
-    return results
+            if article.get("quality") is None:
+                article["quality"] = article_quality(article, cfg)
+            accepted.append(article)
+    accepted.sort(key=lambda a: (a.get("quality", 0.0), a.get("published", "")),
+                  reverse=True)
+    return accepted[:limit]

@@ -57,8 +57,31 @@ voice:
   hindi_voice: "hi-IN-MadhurNeural"
   lang: "hi-IN"
   rate: "+8%"
-  hindi_rate: "+8%"
+  hindi_rate: "+8%"           # legacy fallback only when pace_profile is unset
   kokoro_voice: "am_michael"
+
+  # Documented pacing profile for the Hindi narration (news | calm).
+  # "news" is the default and keeps a 140-word brief in the 45-65s window
+  # (real sample: 132 words -> 59.3s at +8%). "calm" is slower.
+  # The profile drives rate, sentence-pause and inter-word gap settings.
+  pace_profile: "news"
+  # sentence_pause / min_word_gap live inside each profile in pipeline/voice.py
+  # (news: 0.30s / 0.04s, calm: 0.45s / 0.06s). Explicit sentence_pause and
+  # min_word_gap keys here are legacy fallbacks used only if pace_profile is unset.
+
+  # Resilience: a single edge-tts stream can fail with NoAudioReceived in CI.
+  # Retry each voice, then walk the fallback list before raising
+  # VoiceSynthesisError (the caller skips the story rather than failing the job).
+  hindi_voice_fallbacks: ["hi-IN-SwaraNeural", "en-IN-NeerjaNeural"]
+  retry_attempts: 3           # retries per voice AFTER the initial attempt
+  retry_backoff: [1, 2, 4]    # exponential backoff in seconds between retries
+
+# Recommended audio mix levels. Actual placement/ducking lives in
+# pipeline/project.py; these are the tuned targets for that implementation.
+mix:
+  bgm_volume: 0.10            # was 0.12 - lower so narration stays intelligible
+  whoosh_volume: 0.16         # was 0.22 - subtler shot-transition SFX
+  duck_under_voice: true      # dip BGM ~6 dB while narration is speaking
 
 captions:
   min_words: 2

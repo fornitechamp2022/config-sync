@@ -8,6 +8,7 @@ from pathlib import Path
 
 import requests
 
+from .captions import build_caption_timeline, render_timeline_js
 from .utils import ensure_dir, slugify
 
 UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -19,6 +20,36 @@ BGM_FALLBACK = "https://cdn.freesound.org/previews/61/61321_569237-hq.mp3"
 
 def _esc(value: str) -> str:
     return html.escape(value or "", quote=True)
+
+
+def _fit_copy(value: str, limit: int) -> str:
+    """Shorten on-screen copy at a word boundary; full copy stays in the manifest.
+
+    Bounded strings keep every graphic inside the 1080x1920 safe box without
+    CSS ellipsis/clipping (which the layout audit flags as clipped text).
+    """
+    text = " ".join((value or "").split())
+    if len(text) <= limit:
+        return text
+    cut = text[:limit].rsplit(" ", 1)[0].rstrip(" ,;:|।.-")
+    return (cut or text[:limit]) + "…"
+
+
+def _ticker_phrases(story: dict, count: int = 2, limit: int = 16) -> list[str]:
+    """Build the ticker from the script's own sentences — no external feed.
+
+    Phrases are deliberately short: a single nowrap line must fit beside the
+    label inside the 630 px ticker box (x 150..780 at 30 px Devanagari).
+    """
+    skip = ("follow", "subscribe", "जारी", "फॉलो")
+    sentences = [
+        s for s in story.get("sentences", [])
+        if len(s or "") > 18 and not (s or "").strip().lower().startswith(skip)
+    ]
+    phrases = [_fit_copy(s, limit).rstrip("।.") for s in sentences]
+    if not phrases:
+        phrases = [_fit_copy(story.get("headline", ""), limit) or "TOP STORY"]
+    return phrases[:count]
 
 
 def _fetch_bgm(dest: Path, duration: float) -> dict | None:
@@ -78,6 +109,12 @@ def write_project(workdir: str | Path, story: dict, voice: dict, captions: list[
     duration = round(audio_duration + float(vcfg["tail_seconds"]), 2)
     shot_len = float(vcfg["shot_seconds"])
 
+    # Tuned audio levels live in config.yaml (mix:). Fallbacks keep older
+    # configs — and existing generated projects — behaving exactly as before.
+    mix = cfg.get("mix", {}) or {}
+    bgm_volume = float(mix.get("bgm_volume", 0.12))
+    whoosh_volume = float(mix.get("whoosh_volume", 0.22))
+
     # ---- audio assets ----
     audio_dir = ensure_dir(workdir / "assets" / "audio")
     bgm = _fetch_bgm(audio_dir / "bgm.mp3", duration)
@@ -93,6 +130,9 @@ def write_project(workdir: str | Path, story: dict, voice: dict, captions: list[
     ui = {
         "brand": "बॉलीवुड बज़" if is_hi else "BOLLYWOOD BUZZ",
         "kicker": "मनोरंजन  •  टॉप स्टोरी" if is_hi else "ENTERTAINMENT  •  TOP STORY",
+        "breaking": "ब्रेकिंग" if is_hi else "BREAKING",
+        "lower_label": "टॉप स्टोरी" if is_hi else "TOP STORY",
+        "ticker_label": "ताज़ा" if is_hi else "NOW",
         "font": "'Noto Sans Devanagari', Outfit, sans-serif" if is_hi
                 else "Outfit, Montserrat, sans-serif",
     }
@@ -132,31 +172,61 @@ def write_project(workdir: str | Path, story: dict, voice: dict, captions: list[
     hook_words = story["hook"].split()
     display_hook = " ".join(hook_words[:10]) + ("…" if len(hook_words) > 10 else "")
     hook = _esc(display_hook)
-    hook_markup = f'''<div id="hookcard" class="clip" data-start="0.15" data-duration="3.0"
+    hook_markup = f'''<div id="hookcard" class="clip" data-start="0.0" data-duration="3.15"
       data-track-index="1" style="z-index:60">
       <div id="hookinner" class="hook-inner">
         <div class="hook-kicker">{_esc(ui['kicker'])}</div>
         <div class="hook-text">{hook}</div>
+        <div id="hookrule" class="hook-rule"></div>
       </div>
     </div>'''
 
     # ---- persistent news-channel graphics ----
-    graphics_markup = f'''<div id="topbar" class="clip" data-start="0" data-duration="{duration}"
+    # Each graphic is a .clip host; every GSAP tween below targets an inner
+    # wrapper only (never the .clip itself) so Studio stays editable and the
+    # lint rule gsap_animates_clip_element cannot fire.
+    headline = _fit_copy(story["headline"], 58)
+    ticker = " • ".join(_ticker_phrases(story))
+    graphics_markup = f'''<div id="breakingbar" class="clip" data-start="0" data-duration="{duration}"
       data-track-index="2" style="z-index:70">
-      <div id="topbarinner" class="topbar-inner">
-        <span class="live-dot"></span><span>{_esc(ui['brand'])}</span>
-        <span class="topbar-rule"></span>
+      <div class="breaking-band">
+        <div id="breakinginner" class="breaking-inner">
+          <span id="breakingtag" class="breaking-tag">{_esc(ui['breaking'])}</span>
+          <span class="breaking-rule"></span>
+          <span id="breakingtext" class="breaking-text">{_esc(ui['kicker'])}</span>
+          <span id="breakingbrand" class="breaking-brand">{_esc(ui['brand'])}</span>
+        </div>
       </div>
     </div>
-    <div id="lowerthird" class="clip" data-start="0.6" data-duration="{round(max(0.1, duration - 1.2), 2)}"
-      data-track-index="2" style="z-index:71">
-      <div id="lowerinner" class="lower-inner">
-        <span class="lower-accent"></span>
-        <span>{_esc(story['headline'])}</span>
+    <div id="channelbug" class="clip" data-start="0" data-duration="{duration}"
+      data-track-index="3" style="z-index:73">
+      <div id="bugpanel" class="bug-panel">
+        <span id="bugmark" class="bug-mark">BB</span>
+        <span id="buglive" class="bug-live"><span class="bug-dot"></span>LIVE</span>
+      </div>
+    </div>
+    <div id="lowerthird" class="clip" data-start="0" data-duration="{duration}"
+      data-track-index="4" style="z-index:71">
+      <div id="lowerpanel" class="lower-panel">
+        <span id="lowerlabel" class="lower-label">{_esc(ui['lower_label'])}</span>
+        <div id="lowerinner" class="lower-inner">{_esc(headline)}</div>
+      </div>
+    </div>
+    <div id="ticker" class="clip" data-start="0" data-duration="{duration}"
+      data-track-index="5" style="z-index:72">
+      <div class="ticker-band">
+        <div id="tickerinner" class="ticker-inner">
+          <span id="tickerlabel" class="ticker-label">{_esc(ui['ticker_label'])}</span>
+          <span class="ticker-rule"></span>
+          <span id="tickertext" class="ticker-text">{_esc(ticker)}</span>
+        </div>
       </div>
     </div>
     <div id="progress" class="clip" data-start="0" data-duration="{duration}"
-      data-track-index="2" style="z-index:72"><div id="progressbar" class="progress-bar"></div></div>'''
+      data-track-index="6" style="z-index:74">
+      <div class="progress-track"></div>
+      <div id="progressbar" class="progress-bar"></div>
+    </div>'''
 
     # ---- caption host ----
     caption_host = f'''<div id="captions" data-composition-id="captions"
@@ -170,7 +240,7 @@ def write_project(workdir: str | Path, story: dict, voice: dict, captions: list[
       data-fade-out="0.4" data-track-index="10"></audio>''']
     if bgm:
         audio_markup.append(f'''<audio id="bgm" class="clip" src="{bgm['path']}"
-          data-start="0" data-duration="{duration}" data-volume="0.12"
+          data-start="0" data-duration="{duration}" data-volume="{bgm_volume}"
           data-fade-in="1.5" data-fade-out="2.0" data-track-index="11"></audio>''')
     if sfx:
         for i in range(1, total_shots):
@@ -178,15 +248,29 @@ def write_project(workdir: str | Path, story: dict, voice: dict, captions: list[
             if t >= audio_duration:
                 break
             audio_markup.append(f'''<audio id="cut{i}" class="clip" src="{sfx}"
-              data-start="{t}" data-duration="0.3" data-volume="0.22"
+              data-start="{t}" data-duration="0.3" data-volume="{whoosh_volume}"
               data-track-index="12"></audio>''')
 
+    # Everything is a fromTo/to at absolute times; the first 0.8 s is the
+    # graphic package assembling itself, the last second is a quiet exit.
+    outro_at = round(max(0.0, duration - 1.1), 2)
     audio_js = "\n".join([
-        f'tl.fromTo("#topbarinner", {{y:-18,opacity:0}}, {{y:0,opacity:1,duration:0.4,ease:"power4.out"}}, 0.2);',
-        f'tl.fromTo("#hookinner", {{opacity:0,filter:"blur(10px)"}}, '
-        f'{{opacity:1,filter:"blur(0px)",duration:0.25,ease:"power4.out"}}, 0.15);',
-        f'tl.fromTo("#lowerinner", {{x:-24,opacity:0}}, {{x:0,opacity:1,duration:0.45,ease:"power3.out"}}, 0.6);',
-        f'tl.fromTo("#progressbar", {{scaleX:0}}, {{scaleX:1,duration:{duration},ease:"none"}}, 0);',
+        f'tl.fromTo("#breakinginner", {{y:-46,opacity:0}}, '
+        f'{{y:0,opacity:1,duration:0.45,ease:"power4.out"}}, 0.05);',
+        f'tl.fromTo("#hookinner", {{opacity:0,filter:"blur(10px)",scale:0.96}}, '
+        f'{{opacity:1,filter:"blur(0px)",scale:1,duration:0.4,ease:"power4.out"}}, 0.12);',
+        f'tl.fromTo("#hookrule", {{scaleX:0}}, '
+        f'{{scaleX:1,duration:0.5,ease:"power3.out"}}, 0.22);',
+        f'tl.fromTo("#bugpanel", {{y:-24,opacity:0}}, '
+        f'{{y:0,opacity:1,duration:0.35,ease:"power4.out"}}, 0.34);',
+        f'tl.fromTo("#lowerpanel", {{x:-34,opacity:0}}, '
+        f'{{x:0,opacity:1,duration:0.4,ease:"power3.out"}}, 0.46);',
+        f'tl.fromTo("#tickerinner", {{y:22,opacity:0}}, '
+        f'{{y:0,opacity:1,duration:0.34,ease:"power3.out"}}, 0.56);',
+        f'tl.fromTo("#progressbar", {{scaleX:0}}, '
+        f'{{scaleX:1,duration:{duration},ease:"none"}}, 0);',
+        f'tl.to("#lowerpanel", {{opacity:0,y:-18,duration:0.7,ease:"power2.in"}}, {outro_at});',
+        f'tl.to("#tickerinner", {{opacity:0,y:18,duration:0.6,ease:"power2.in"}}, {outro_at});',
     ] + tweens)
 
     index_html = f'''<!doctype html>
@@ -198,23 +282,65 @@ def write_project(workdir: str | Path, story: dict, voice: dict, captions: list[
 <style>
 {font_faces}
 *{{margin:0;padding:0;box-sizing:border-box}}
-html,body{{width:{width}px;height:{height}px;overflow:hidden;background:#05060a}}
-#root{{position:absolute;inset:0;font-family:{ui['font']};color:#fff}}
+html,body{{width:{width}px;height:{height}px;overflow:hidden;background:#05070D}}
+#root{{position:absolute;inset:0;font-family:{ui['font']};color:#fff;
+  --news-red:#E11D2E;--news-yellow:#FFE600;--news-navy:#0A0F1E;--news-ink:#05070D}}
 .shot{{position:absolute;inset:0;overflow:hidden}}
 .shot-motion{{position:absolute;inset:-2%;will-change:transform}}
-.hook-inner{{position:absolute;left:140px;right:200px;top:430px;text-align:center}}
-.hook-kicker{{font-size:30px;font-weight:800;letter-spacing:.16em;color:#FFE600;margin-bottom:18px}}
+.hook-inner{{position:absolute;left:150px;right:250px;top:430px;text-align:center}}
+.hook-kicker{{font-size:30px;font-weight:900;letter-spacing:.14em;color:var(--news-yellow);
+  margin-bottom:18px;text-shadow:0 3px 12px #000}}
 .hook-text{{font-size:{54 if is_hi else 62}px;font-weight:900;line-height:1.05;letter-spacing:-.02em;
   text-shadow:0 6px 26px rgba(0,0,0,.95);color:#fff}}
-.topbar-inner{{position:absolute;left:140px;right:200px;top:340px;display:flex;align-items:center;gap:14px;
-  font-size:30px;font-weight:800;letter-spacing:.08em;text-shadow:0 3px 12px #000}}
-.live-dot{{width:16px;height:16px;border-radius:50%;background:#FF2D2D;box-shadow:0 0 14px #FF2D2D}}
-.topbar-rule{{height:2px;flex:1;background:linear-gradient(90deg,#FFE600,transparent)}}
-.topbar-source{{font-weight:600;opacity:.85;letter-spacing:.04em}}
-.lower-inner{{position:absolute;left:140px;right:200px;top:930px;display:flex;align-items:center;gap:16px;
-  font-size:30px;font-weight:700;line-height:1.15;text-shadow:0 3px 12px #000}}
-.lower-accent{{width:7px;align-self:stretch;background:#FFE600;border-radius:4px;min-height:34px}}
-.progress-bar{{position:absolute;left:0;bottom:0;height:7px;width:100%;background:#FFE600;
+.hook-rule{{height:6px;width:180px;margin:22px auto 0;border-radius:3px;
+  background:var(--news-yellow);transform-origin:center center}}
+/* Breaking-news band: navy field, red accent rule, yellow keyline */
+.breaking-band{{position:absolute;left:0;right:0;top:288px;height:90px;
+  background:linear-gradient(90deg,var(--news-navy) 0%,rgba(10,15,30,.95) 70%,rgba(10,15,30,.6) 100%);
+  border-top:3px solid var(--news-red);border-bottom:3px solid var(--news-yellow);
+  box-shadow:0 12px 30px rgba(0,0,0,.55)}}
+.breaking-inner{{position:absolute;left:150px;right:250px;top:0;height:100%;
+  display:flex;align-items:center;gap:16px;white-space:nowrap}}
+.breaking-tag{{background:var(--news-red);color:#fff;font-size:30px;font-weight:900;letter-spacing:.06em;
+  padding:8px 14px;border-radius:4px;box-shadow:0 3px 14px rgba(225,29,46,.55)}}
+.breaking-rule{{width:3px;height:38px;background:var(--news-yellow);flex:none}}
+.breaking-text{{font-size:32px;font-weight:800;letter-spacing:.03em;color:#fff;
+  text-shadow:0 3px 10px #000}}
+.breaking-brand{{margin-left:auto;font-size:30px;font-weight:900;letter-spacing:.04em;
+  color:var(--news-yellow);text-shadow:0 3px 10px #000}}
+
+/* Persistent channel bug with LIVE indicator */
+.bug-panel{{position:absolute;top:758px;right:300px;width:196px;height:72px;
+  background:rgba(10,15,30,.92);border:2px solid var(--news-red);border-radius:6px;
+  display:flex;align-items:center;gap:12px;padding:0 12px;box-shadow:0 8px 24px rgba(0,0,0,.6)}}
+.bug-mark{{width:46px;height:46px;border-radius:4px;background:var(--news-red);color:#fff;
+  font-size:30px;font-weight:900;display:flex;align-items:center;justify-content:center;flex:none}}
+.bug-live{{font-size:30px;font-weight:900;letter-spacing:.08em;color:#fff;white-space:nowrap}}
+.bug-dot{{display:inline-block;width:14px;height:14px;margin-right:7px;border-radius:50%;
+  background:var(--news-red);box-shadow:0 0 12px var(--news-red)}}
+
+/* Lower-third: thin coloured rule, label tab and bounded headline */
+.lower-panel{{position:absolute;left:150px;right:300px;top:866px;min-height:130px;
+  background:linear-gradient(100deg,rgba(10,15,30,.96),rgba(10,15,30,.78));
+  border-top:5px solid var(--news-yellow);border-left:7px solid var(--news-red);
+  box-shadow:0 -10px 34px rgba(0,0,0,.55);padding:16px 18px 14px 20px}}
+.lower-label{{display:inline-block;background:var(--news-red);color:#fff;font-size:28px;font-weight:900;
+  letter-spacing:.08em;padding:5px 12px;border-radius:3px;margin-bottom:10px}}
+.lower-inner{{font-size:32px;font-weight:800;line-height:1.18;color:#fff;
+  text-shadow:0 3px 10px #000;overflow-wrap:anywhere}}
+
+/* Ticker strip: short phrases taken from the script itself */
+.ticker-band{{position:absolute;left:0;right:0;top:1188px;height:54px;
+  background:rgba(5,7,13,.9);border-top:2px solid var(--news-red);
+  border-bottom:2px solid rgba(255,230,0,.55)}}
+.ticker-inner{{position:absolute;left:150px;right:300px;top:0;height:100%;
+  display:flex;align-items:center;gap:14px;white-space:nowrap}}
+.ticker-label{{font-size:28px;font-weight:900;letter-spacing:.06em;color:var(--news-yellow);flex:none}}
+.ticker-rule{{width:2px;height:28px;background:rgba(255,255,255,.4);flex:none}}
+.ticker-text{{font-size:30px;font-weight:700;color:#fff;text-shadow:0 2px 8px #000}}
+
+.progress-track{{position:absolute;left:0;right:0;bottom:0;height:8px;background:rgba(255,255,255,.16)}}
+.progress-bar{{position:absolute;left:0;bottom:0;height:8px;width:100%;background:var(--news-yellow);
   transform-origin:left center}}
 </style>
 </head>
@@ -237,10 +363,21 @@ tl.seek(0);
 </html>'''
 
     # ---- captions sub-composition ----
-    cap_markup, cap_js = [], []
+    # Timing is owned by captions.py::build_caption_timeline (monotonic word
+    # highlighting + validation). project.py only renders its events into the
+    # sub-composition and keeps the soft fades on the *inner child* of each clip.
+    prepared = []
     for group in captions:
-        start = max(0.1, round(group["start"], 3))
-        end = round(max(group["end"], start + 0.4), 3)
+        g = dict(group)
+        g["start"] = max(0.1, round(float(group["start"]), 3))
+        g["end"] = round(max(float(group["end"]), g["start"] + 0.4), 3)
+        prepared.append(g)
+    timeline = build_caption_timeline(prepared, cfg)
+
+    cap_markup = []
+    cap_fades = []
+    for group in timeline["groups"]:
+        start, end = group["start"], group["end"]
         words_html = " ".join(
             f'<span id="{group["id"]}_w{i}" class="cap-word">{_esc(w["text"])}</span>'
             for i, w in enumerate(group["words"])
@@ -251,24 +388,19 @@ tl.seek(0);
           data-track-index="0" style="z-index:{10 + int(start * 10)}">
           <div id="{inner}" class="cap-inner"><div class="cap-line">{words_html}</div></div>
         </div>''')
-        cap_js.append(
-            f'tl.set("#{inner}", {{opacity:1,visibility:"visible"}}, {start});'
-        )
-        cap_js.append(
+        # Visibility + karaoke colours come from the shared timeline below;
+        # these two short fades are presentation only, on the child wrapper.
+        cap_fades.append(
             f'tl.fromTo("#{inner}", {{opacity:0}}, {{opacity:1,duration:0.12,'
             f'ease:"power2.out"}}, {start});'
         )
-        for i, w in enumerate(group["words"]):
-            wid = f"{group['id']}_w{i}"
-            ws = max(start, round(float(w["start"]), 3))
-            we = max(ws + 0.05, round(float(w["end"]), 3))
-            cap_js.append(f'tl.set("#{wid}", {{color:"#FFE600"}}, {ws});')
-            cap_js.append(f'tl.set("#{wid}", {{color:"#FFFFFF"}}, {we});')
-        cap_js.append(
+        cap_fades.append(
             f'tl.to("#{inner}", {{opacity:0,duration:0.12,ease:"power2.in"}}, '
             f'{round(max(start, end - 0.12), 3)});'
         )
-        cap_js.append(f'tl.set("#{inner}", {{opacity:0,visibility:"hidden"}}, {end});')
+    cap_js = render_timeline_js(timeline) + (
+        ("\n" + "\n".join(cap_fades)) if cap_fades else ""
+    )
 
     captions_html = f'''<template>
 <style>
@@ -288,7 +420,7 @@ tl.seek(0);
 </div>
 <script>
 const tl = gsap.timeline({{paused:true}});
-{chr(10).join(cap_js)}
+{cap_js}
 window.__timelines["captions"] = tl;
 tl.seek(0);
 </script>
@@ -319,5 +451,7 @@ tl.seek(0);
         "bgm": bgm,
         "voice": voice["audio"],
         "captions": len(captions),
+        "caption_timeline_valid": timeline["valid"],
+        "caption_timeline_errors": timeline["errors"],
     }
     return {"duration": duration, "bgm": bgm, "shots": len(shots)}
