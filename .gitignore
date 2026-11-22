@@ -1,0 +1,8 @@
+work/
+out/
+state/
+node_modules/
+.hyperframes/
+__pycache__/
+*.pyc
+.env

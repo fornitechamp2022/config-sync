@@ -1,0 +1,86 @@
+# Bollywood Reel Generator — configuration
+# No LLM. Script is assembled deterministically from headline + lead + body,
+# then rendered in Hindi via a free machine-translation service.
+
+language:
+  output: "hi"              # hi | en
+  hindi_target_words: 140
+
+topic:
+  primary: "Bigg Boss 20"
+  keywords: ["Bigg Boss", "Salman Khan", "Bollywood", "Kanika", "Qazi", "ScoutOP", "Love Gill", "Mahhi Vij", "Gauahar"]
+  bing_queries:
+    - "Bigg Boss 20"
+    - "Bigg Boss 20 Salman Khan"
+    - "Bigg Boss 20 eviction"
+    - "Bigg Boss 20 Weekend Ka Vaar"
+    - "Bigg Boss 20 captaincy"
+    - "Bigg Boss 20 contestants"
+    - "Bollywood news today"
+    - "Bollywood entertainment news"
+    - "Salman Khan Bigg Boss"
+    - "Bollywood celebrity news"
+  direct_feeds:
+    - "https://www.bollywoodhungama.com/feed/"
+    - "https://indianexpress.com/section/entertainment/feed/"
+    - "https://www.hindustantimes.com/feeds/rss/entertainment/rssfeed.xml"
+  preferred_sources:
+    - "FilmiBeat"
+    - "Bollywood Hungama"
+    - "Indian Express"
+    - "Hindustan Times"
+    - "India TV News"
+    - "ABP News"
+    - "Outlook India"
+    - "Deccan Chronicle"
+    - "Times Now"
+    - "India Forums"
+  skip_url_patterns: ["msn.com", "wionews.com", "edgesuite.net"]
+
+gate:
+  lookback_days: 7
+  min_paragraphs: 3
+  min_chars: 600
+  title_overlap_ratio: 0.34
+  min_width: 900
+
+story:
+  min_words: 110
+  max_words: 165
+  min_sentences: 4
+  target_body_paragraphs: 3
+  cta: "Follow for more Bollywood updates."
+
+voice:
+  provider: "edge"            # edge | kokoro
+  voice: "en-IN-PrabhatNeural" # Indian-accent male; NeerjaNeural for female
+  hindi_voice: "hi-IN-MadhurNeural"
+  lang: "hi-IN"
+  rate: "+8%"
+  hindi_rate: "+8%"
+  kokoro_voice: "am_michael"
+
+captions:
+  min_words: 2
+  max_words: 5
+  pause_break: 0.16
+  highlight_color: "#FFE600"
+  text_color: "#FFFFFF"
+
+video:
+  width: 1080
+  height: 1920
+  fps: 30
+  shot_seconds: 2.2
+  min_shots: 20
+  max_shots: 40
+  skip_image_hosts: ["figma.site", "figma.com", "doubleclick", "googlesyndication", "adservice", "banner"]
+  tail_seconds: 1.0
+
+publish:
+  state_backend: "blob"      # blob | local
+  video_store: "reels-media"
+  state_store: "reels-state"
+  youtube: true
+  instagram: true
+  verification_required: true

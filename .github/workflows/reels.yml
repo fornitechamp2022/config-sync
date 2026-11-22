@@ -1,0 +1,68 @@
+name: Bollywood Reels
+
+# Every six hours, plus manual runs. The generator appends to its own ledger,
+# so no git writes (and no write token) are required.
+on:
+  schedule:
+    - cron: "0 */6 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: bollywood-reels
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
+
+      - name: Install pinned HyperFrames CLI
+        run: npm install --no-save hyperframes@0.9.77
+
+      - name: Point generator at pinned CLI
+        run: |
+          echo "HYPERFRAMES_CLI=${GITHUB_WORKSPACE}/node_modules/hyperframes/bin/hyperframes.mjs" >> "$GITHUB_ENV"
+
+      - name: Verify CLI path
+        run: test -f "$HYPERFRAMES_CLI"
+
+      - name: Generate reel
+        run: python generate.py --run --count 1
+        env:
+          BLOB_STATE_TOKEN: ${{ secrets.BLOB_STATE_TOKEN }}
+          BLOB_STATE_STORE_ID: ${{ secrets.BLOB_STATE_STORE_ID }}
+          BLOB_VIDEO_TOKEN: ${{ secrets.BLOB_VIDEO_TOKEN }}
+          BLOB_VIDEO_STORE_ID: ${{ secrets.BLOB_VIDEO_STORE_ID }}
+          YT_CLIENT_ID: ${{ secrets.YT_CLIENT_ID }}
+          YT_CLIENT_SECRET: ${{ secrets.YT_CLIENT_SECRET }}
+          YT_REFRESH_TOKEN: ${{ secrets.YT_REFRESH_TOKEN }}
+          IG_LONG_LIVED_TOKEN: ${{ secrets.IG_LONG_LIVED_TOKEN }}
+          IG_USER_ID: ${{ secrets.IG_USER_ID }}
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reels-${{ github.run_id }}
+          path: |
+            out/*.mp4
+            out/*.manifest.json
+            work/*/captions.json
+            work/*/words.json
+          if-no-files-found: warn
