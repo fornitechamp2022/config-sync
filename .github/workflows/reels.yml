@@ -35,6 +35,9 @@ jobs:
       - name: Install pinned HyperFrames CLI
         run: npm install --no-save hyperframes@0.9.77
 
+      - name: Install pinned Netlify CLI
+        run: npm install --no-save netlify-cli@24 --silent
+
       - name: Point generator at pinned CLI
         run: |
           echo "HYPERFRAMES_CLI=${GITHUB_WORKSPACE}/node_modules/hyperframes/bin/hyperframes.mjs" >> "$GITHUB_ENV"
@@ -45,6 +48,8 @@ jobs:
       - name: Generate reel
         run: python generate.py --run --count 1
         env:
+          NETLIFY_AUTH_TOKEN: ${{ secrets.NETLIFY_AUTH_TOKEN }}
+          NETLIFY_SITE_ID: ${{ secrets.NETLIFY_SITE_ID }}
           BLOB_STATE_TOKEN: ${{ secrets.BLOB_STATE_TOKEN }}
           BLOB_STATE_STORE_ID: ${{ secrets.BLOB_STATE_STORE_ID }}
           BLOB_VIDEO_TOKEN: ${{ secrets.BLOB_VIDEO_TOKEN }}

@@ -78,9 +78,10 @@ video:
   tail_seconds: 1.0
 
 publish:
-  state_backend: "blob"      # blob | local
-  video_store: "reels-media"
-  state_store: "reels-state"
+  state_backend: "netlify"   # netlify | blob | local (active: Netlify Blobs)
+  netlify_state_store: "reel-state"  # Netlify Blobs store for run records
+  video_store: "reels-media"  # Vercel Blob store: public MP4 hosting
+  state_store: "reels-state"  # Vercel Blob store: legacy state backend
   youtube: true
   instagram: true
   verification_required: true

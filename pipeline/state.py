@@ -1,17 +1,23 @@
 """State layer.
 
-Default: append-only JSON records in a PRIVATE Vercel Blob store. One immutable,
-uniquely named record per run avoids overwrites, CDN staleness and the need for
-conditional writes. A local JSON file is used for development and as a safe
-fallback whenever Blob credentials or the SDK are unavailable.
+Default: append-only JSON records in a PRIVATE Netlify Blob store named
+``reel-state``. The Vercel Blob SDK backend remains available, and a local JSON
+file is used for development and as a safe fallback whenever the chosen
+backend's CLI/credentials/SDK are unavailable. One immutable, uniquely named
+record per run avoids overwrites, CDN staleness and the need for conditional
+writes.
 
 State stores metadata only — article keys, image hashes, ledger ids and public
-URLs. Image/video *bytes* are never committed to state.
+URLs. Image/video *bytes* are never committed to state. Credentials are read
+from the environment and are never placed in CLI command strings or logs.
 """
 from __future__ import annotations
 
 import json
 import os
+import shutil
+import subprocess
+import tempfile
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -21,6 +27,7 @@ from .utils import similarity
 
 JACCARD_THRESHOLD = 0.6
 RECORD_PREFIX = "state/runs/"
+NETLIFY_STATE_STORE = "reel-state"
 
 # Sentinel used by _metadata_only() to distinguish "drop this value" from a
 # legitimate JSON null.
@@ -68,6 +75,14 @@ class State:
         # Credentials are read from the environment, never from the repo/config.
         self._token = os.environ.get("BLOB_STATE_TOKEN", "").strip()
         self._store = os.environ.get("BLOB_STATE_STORE_ID", "").strip()
+        # Netlify CLI reads these straight from the environment; we only inspect
+        # them here to decide whether the backend is usable. They are never
+        # passed on a command line (which could be logged).
+        self._netlify_token = os.environ.get("NETLIFY_AUTH_TOKEN", "").strip()
+        self._netlify_site = os.environ.get("NETLIFY_SITE_ID", "").strip()
+        self._netlify_store = str(
+            publish_cfg.get("netlify_state_store") or NETLIFY_STATE_STORE
+        )
         self._local = self.workdir / "state" / "ledger.json"
         try:
             self._threshold = float(
@@ -97,10 +112,145 @@ class State:
             print(f"[state] Vercel Blob SDK unavailable: {exc}")
             return None
 
+    # ---------- Netlify Blobs (CLI) ----------
+    def _has_netlify_creds(self) -> bool:
+        """The Netlify CLI reads both credentials from the environment."""
+        return (
+            self.backend == "netlify"
+            and bool(self._netlify_token and self._netlify_site)
+        )
+
+    def _netlify_cli(self):
+        """Return the CLI argv prefix, or None when no CLI is installed.
+
+        Prefer a locally installed binary; fall back to the project's pinned
+        local CLI via ``npx --no-install``. ``--no-install`` matters in CI: it
+        prevents npm from fetching an unpinned version at runtime.
+        """
+        exe = shutil.which("netlify")
+        if exe:
+            return [exe]
+        npx = shutil.which("npx")
+        if npx:
+            return [npx, "--no-install", "netlify"]
+        return None
+
+    def _netlify_run(self, args: list[str]):
+        """Run one Netlify CLI subcommand. Never echoes credentials."""
+        cli = self._netlify_cli()
+        if cli is None:
+            return None
+        try:
+            # Credentials are supplied only via the inherited environment.
+            return subprocess.run(
+                cli + args, capture_output=True, text=True, timeout=180
+            )
+        except Exception as exc:  # CLI missing, crashed or timed out
+            print(f"[state] netlify CLI call failed: {type(exc).__name__}")
+            return None
+
+    @staticmethod
+    def _netlify_keys(stdout: str) -> list[str]:
+        """Accept either a JSON array or an object wrapping the key list."""
+        try:
+            data = json.loads(stdout)
+        except (TypeError, ValueError):
+            return []
+        if isinstance(data, dict):
+            for field in ("blobs", "keys", "items", "objects", "results"):
+                if isinstance(data.get(field), list):
+                    data = data[field]
+                    break
+        if not isinstance(data, list):
+            return []
+        keys: list[str] = []
+        for item in data:
+            if isinstance(item, str):
+                key = item
+            elif isinstance(item, dict):
+                key = (
+                    item.get("key")
+                    or item.get("pathname")
+                    or item.get("name")
+                    or ""
+                )
+            else:
+                continue
+            key = str(key)
+            if key.startswith(RECORD_PREFIX):
+                keys.append(key)
+        return keys
+
+    def _netlify_load(self) -> bool:
+        """Merge all immutable Netlify records. Return False to use local JSON."""
+        if not self._has_netlify_creds() or self._netlify_cli() is None:
+            return False
+        proc = self._netlify_run(
+            ["blobs:list", self._netlify_store, "--prefix", RECORD_PREFIX, "--json"]
+        )
+        if proc is None or proc.returncode != 0:
+            print("[state] netlify blob list failed, using local")
+            return False
+
+        records: list[tuple[str, dict]] = []
+        for key in self._netlify_keys(proc.stdout):
+            fd, tmp = tempfile.mkstemp(prefix="netlify-state-", suffix=".json")
+            os.close(fd)
+            try:
+                got = self._netlify_run(
+                    ["blobs:get", self._netlify_store, key, "--output", tmp]
+                )
+                if got is None or got.returncode != 0:
+                    print(f"[state] skipping unreadable netlify record {key}")
+                    continue
+                record = json.loads(Path(tmp).read_text(encoding="utf-8"))
+                if isinstance(record, dict):
+                    records.append((key, record))
+            except Exception as exc:
+                print(f"[state] skipping corrupt netlify record {key}: "
+                      f"{type(exc).__name__}")
+                continue
+            finally:
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
+
+        # Apply oldest-first so later runs win on shared article keys.
+        for _key, record in sorted(
+            records, key=lambda pair: (str(pair[1].get("at", "")), pair[0])
+        ):
+            self._merge(record)
+        return True
+
+    def _netlify_record(self, key: str, delta: dict) -> bool:
+        """Set one uniquely named, immutable record. Return True on success."""
+        fd, tmp = tempfile.mkstemp(prefix="netlify-state-", suffix=".json")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                json.dump(delta, handle, ensure_ascii=False, sort_keys=True)
+            proc = self._netlify_run(
+                ["blobs:set", self._netlify_store, key, "--input", tmp, "--force"]
+            )
+            if proc is not None and proc.returncode == 0:
+                return True
+            print("[state] netlify blob write failed, using local")
+            return False
+        except Exception as exc:
+            print(f"[state] netlify blob write failed: {type(exc).__name__}")
+            return False
+        finally:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+
     # ---------- loading ----------
     def load(self) -> dict:
         """Load and merge every immutable run record; fall back to local JSON."""
         self.data = _blank()
+        if self.backend == "netlify" and self._netlify_load():
+            return self.data
         opts = self._blob_options()
         if opts is not None:
             try:
@@ -230,6 +380,16 @@ class State:
         # Keep this process's view consistent regardless of the chosen backend.
         self._merge(delta)
 
+        if (
+            self.backend == "netlify"
+            and self._has_netlify_creds()
+            and self._netlify_cli() is not None
+        ):
+            # Unique suffix means a rerun always appends a new record rather
+            # than overwriting an existing one (immutable audit trail).
+            key = f"{RECORD_PREFIX}{stamp}-{uuid.uuid4().hex[:12]}.json"
+            if self._netlify_record(key, delta):
+                return
         opts = self._blob_options()
         if opts is not None:
             try:

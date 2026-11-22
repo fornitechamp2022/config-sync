@@ -26,7 +26,7 @@ HyperFrames project (pinned CLI 0.9.77) → check → render → ffmpeg size cap
 Vercel Blob (public MP4 URL, rolling 7-day cleanup)
         ↓  → YouTube Shorts   (OAuth refresh token + resumable upload)
         ↓  → Instagram Reels  (Graph API: container → poll → publish)
-append-only private Vercel Blob state records (local JSON fallback)
+append-only private Netlify Blob state records (Vercel Blob / local JSON fallback)
 ```
 
 Every publishing step is optional: it runs only when its credentials are present
@@ -49,11 +49,12 @@ ledger so a rerun never double-posts.
 | `pipeline/qa.py` | script quality flags used by the pilot and production gate |
 | `pipeline/images.py` | image download, perceptual-hash dedupe and collage baking |
 | `pipeline/project.py` | HyperFrames project writer (motion, graphics, captions, audio) |
-| `pipeline/state.py` | append-only state (private Vercel Blob or local JSON) |
+| `pipeline/state.py` | append-only state (private Netlify Blobs or Vercel Blob, local JSON fallback) |
 | `pipeline/publish.py` | public Blob video, YouTube Shorts and Instagram Reels |
 | `assets/fonts/` | bundled Noto Sans Devanagari (OFL) |
 | `.github/workflows/reels.yml` | 6-hourly scheduled run (cron + manual dispatch) |
 | `tests/test_state_publish.py` | offline unit tests for state, publish and the workflow YAML |
+| `tests/test_netlify_state.py` | offline tests for the Netlify Blobs state backend |
 | `QUALITY_REPORT.md` | acceptance criteria, iteration record and remaining manual steps |
 
 ## Run locally
@@ -63,12 +64,13 @@ pip install -r requirements.txt
 python generate.py --check                               # discovery + gate + story preview
 python pilot.py                                          # 14-day sentence-first script audit
 python generate.py --run --count 1 --no-publish --local-state
-python -m pytest tests/test_state_publish.py -q          # offline tests, no network
+python -m pytest tests -q                                # all offline tests, no network
 ```
 
-`--local-state` forces the local JSON ledger (`state/ledger.json`) even when the
-Blob backend is configured. A full run writes the render to `out/`, a per-reel
-manifest (`out/*.manifest.json`) and the collage stills under `work/`.
+`--local-state` forces the local JSON ledger (`state/ledger.json`) even when a
+remote backend (`netlify` or `blob`) is configured. A full run writes the render
+to `out/`, a per-reel manifest (`out/*.manifest.json`) and the collage stills
+under `work/`.
 
 Set `HYPERFRAMES_CLI` to the pinned CLI's `bin/hyperframes.mjs` if `npx` is
 unavailable; CI does this from `node_modules/hyperframes` after installing
@@ -88,19 +90,33 @@ unavailable; CI does this from `node_modules/hyperframes` after installing
 
 ## State and publishing
 
-State is an append-only audit log: one uniquely named JSON record per run in a
-**private** Vercel Blob store under `state/runs/`, merged on load by run id. It
-holds article keys, image hashes, platform IDs and public URLs — never image or
-video bytes. If credentials or the SDK are missing, it transparently falls back
-to `state/ledger.json`. Public MP4s live in a separate Blob store and are pruned
-after 7 days.
+State is an append-only audit log: one uniquely named JSON record per run,
+merged oldest-first on load. It holds article keys, image hashes, platform IDs
+and public URLs — never image or video bytes. The active backend is **Netlify
+Blobs** (`publish.state_backend: netlify`):
+
+- Store: `reel-state` (override with `publish.netlify_state_store`).
+- Keys: `state/runs/<timestamp>-<uuid>.json`; new runs append, never overwrite.
+- Access is via the locally installed Netlify CLI (`netlify-cli@24` in CI, or
+  `npx --no-install netlify`), using `netlify blobs:list`, `blobs:get` and
+  `blobs:set`. The CLI reads `NETLIFY_AUTH_TOKEN` and `NETLIFY_SITE_ID` from the
+  environment — tokens are never put in command strings or logs.
+- If the CLI or credentials are missing, state transparently falls back to
+  `state/ledger.json`. The Vercel Blob backend remains available by setting
+  `publish.state_backend: blob` (requires `BLOB_STATE_TOKEN` and
+  `BLOB_STATE_STORE_ID`).
+
+Public MP4 hosting still uses the separate **Vercel Blob** store (`reels-media`)
+via `BLOB_VIDEO_TOKEN` / `BLOB_VIDEO_STORE_ID`, with a rolling 7-day cleanup.
+Netlify is used for state only; Vercel remains available for public MP4s.
 
 ## GitHub Actions secrets
 
 | Secret | Needed for |
 |---|---|
-| `BLOB_STATE_TOKEN`, `BLOB_STATE_STORE_ID` | private state store |
-| `BLOB_VIDEO_TOKEN`, `BLOB_VIDEO_STORE_ID` | public MP4 hosting |
+| `NETLIFY_AUTH_TOKEN`, `NETLIFY_SITE_ID` | private Netlify Blobs state (store `reel-state`) |
+| `BLOB_STATE_TOKEN`, `BLOB_STATE_STORE_ID` | private Vercel Blob state (legacy backend) |
+| `BLOB_VIDEO_TOKEN`, `BLOB_VIDEO_STORE_ID` | public MP4 hosting (Vercel Blob) |
 | `YT_CLIENT_ID`, `YT_CLIENT_SECRET`, `YT_REFRESH_TOKEN` | YouTube Shorts |
 | `IG_LONG_LIVED_TOKEN`, `IG_USER_ID` | Instagram Reels |
 
