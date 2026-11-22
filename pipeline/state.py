@@ -15,11 +15,12 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
 import uuid
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +29,12 @@ from .utils import similarity
 JACCARD_THRESHOLD = 0.6
 RECORD_PREFIX = "state/runs/"
 NETLIFY_STATE_STORE = "reel-state"
+STATE_TTL_DAYS = 30
+# The newest runs and everything they reference are pinned so the current run
+# can never be pruned, even if the local clock or an old record disagrees.
+KEEP_RECENT_RUNS = 5
+PRUNED_AT_KEY = "pruned_at"
+LAST_PRUNE_KEY = "last_prune"
 
 # Sentinel used by _metadata_only() to distinguish "drop this value" from a
 # legitimate JSON null.
@@ -40,6 +47,64 @@ def _blank() -> dict:
 
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _parse_time(value: Any) -> datetime | None:
+    """Parse an ISO timestamp, datetime/date, epoch number or id prefix."""
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        try:
+            parsed = datetime.fromtimestamp(value, tz=timezone.utc)
+        except (ValueError, OSError, OverflowError):
+            return None
+    elif isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            match = re.match(r"^(\d{8}T\d{6}Z)", text)
+            try:
+                if match:
+                    parsed = datetime.strptime(match.group(1), "%Y%m%dT%H%M%SZ")
+                else:
+                    parsed = datetime.fromisoformat(text[:10])
+            except ValueError:
+                return None
+    elif isinstance(value, datetime):
+        parsed = value
+    elif isinstance(value, date):
+        parsed = datetime.combine(value, datetime.min.time())
+    else:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def _key_time(key: str) -> datetime | None:
+    """Read the UTC timestamp embedded in a remote record key, if present."""
+    match = re.search(r"(\d{8}T\d{6}Z)", str(key))
+    if not match:
+        return None
+    try:
+        return datetime.strptime(match.group(1), "%Y%m%dT%H%M%SZ").replace(
+            tzinfo=timezone.utc)
+    except ValueError:
+        return None
+
+
+def _entry_time(entry: Any) -> datetime | None:
+    """Age of a ledger entry from its own metadata (never from media bytes)."""
+    if not isinstance(entry, dict):
+        return None
+    for field in ("at", "updated_at", "seen_at", "created_at"):
+        parsed = _parse_time(entry.get(field))
+        if parsed is not None:
+            return parsed
+    return None
 
 
 def _metadata_only(value: Any) -> Any:
@@ -250,6 +315,7 @@ class State:
         """Load and merge every immutable run record; fall back to local JSON."""
         self.data = _blank()
         if self.backend == "netlify" and self._netlify_load():
+            self.prune(remote=True)
             return self.data
         opts = self._blob_options()
         if opts is not None:
@@ -275,10 +341,12 @@ class State:
                 # Apply oldest-first so later runs win on shared article keys.
                 for record in sorted(records, key=lambda r: str(r.get("at", ""))):
                     self._merge(record)
+                self.prune(remote=True)
                 return self.data
             except Exception as exc:
                 print(f"[state] blob load failed, using local: {exc}")
         self._load_local()
+        self.prune()
         return self.data
 
     def _load_local(self) -> None:
@@ -314,6 +382,185 @@ class State:
             if rid and rid not in seen_ids:
                 runs.append(run)
                 seen_ids.add(rid)
+
+    # ---------- retention ----------
+    def _delete_stale_remote_keys(self, keys: list[str], cutoff: datetime,
+                                  protected: set[str], delete_fn) -> None:
+        """Delete old immutable remote records, skipping the newest/current one."""
+        parsed = [(str(key), _key_time(key)) for key in keys if key]
+        known = [stamp for _, stamp in parsed if stamp is not None]
+        newest = max(known) if known else None
+        for key, stamp in parsed:
+            if stamp is None or stamp >= cutoff:
+                continue
+            if any(run_id and run_id in key for run_id in protected):
+                continue
+            if newest is not None and stamp == newest:
+                continue
+            try:
+                if delete_fn(key):
+                    print(f"[state] pruned remote record {key}")
+            except Exception as exc:
+                print(f"[state] remote prune skipped {key}: {type(exc).__name__}: {exc}")
+
+    def _prune_remote(self, cutoff: datetime, protected: set[str]) -> None:
+        """Best-effort pruning of the append-only remote record store."""
+        if self.backend == "netlify":
+            if not (self._has_netlify_creds() and self._netlify_cli() is not None):
+                return
+            try:
+                proc = self._netlify_run([
+                    "blobs:list", self._netlify_store, "--prefix", RECORD_PREFIX, "--json"
+                ])
+                if proc is None or proc.returncode != 0:
+                    return
+
+                def delete(key: str) -> bool:
+                    result = self._netlify_run([
+                        "blobs:delete", self._netlify_store, key, "--force"
+                    ])
+                    return result is not None and result.returncode == 0
+
+                self._delete_stale_remote_keys(
+                    self._netlify_keys(proc.stdout), cutoff, protected, delete)
+            except Exception as exc:
+                print(f"[state] netlify remote prune skipped: {type(exc).__name__}")
+            return
+
+        opts = self._blob_options()
+        if opts is None:
+            return
+        try:
+            from vercel.api import session
+            from vercel.blob import sync as blob
+
+            with session(service_options=[opts]):
+                keys = [
+                    getattr(item, "pathname", "")
+                    for item in blob.query_blobs(prefix=RECORD_PREFIX)
+                    if getattr(item, "pathname", "")
+                ]
+                self._delete_stale_remote_keys(
+                    keys, cutoff, protected, lambda key: self._safe_blob_delete(blob, key))
+        except Exception as exc:
+            print(f"[state] blob remote prune skipped: {exc}")
+
+    @staticmethod
+    def _safe_blob_delete(blob, key: str) -> bool:
+        try:
+            blob.delete_blob(key)
+            return True
+        except Exception as exc:
+            print(f"[state] blob prune skipped {key}: {exc}")
+            return False
+
+    def prune(self, max_age_days: int = STATE_TTL_DAYS, *, remote: bool = False,
+              keep_recent: int = KEEP_RECENT_RUNS) -> dict:
+        """Drop ledger entries older than the retention window.
+
+        Called on load and before each write. The newest few runs and anything
+        they reference are pinned, so the current run is never removed. Returns
+        a summary and records ``pruned_at`` / ``last_prune`` in ``self.data``.
+        Media bytes are never read or written — only metadata ages are checked.
+        """
+        try:
+            days = int(max_age_days)
+        except (TypeError, ValueError):
+            days = STATE_TTL_DAYS
+        now = _utc_now()
+        cutoff = now - timedelta(days=max(0, days))
+        data = self.data
+        runs = [run for run in (data.get("runs") or []) if isinstance(run, dict)]
+
+        def run_time(run: dict) -> datetime | None:
+            return _parse_time(run.get("at")) or _parse_time(run.get("id"))
+
+        # Pin the newest runs before anything is removed. Keeping at least one
+        # guarantees the just-written/current run survives a prune.
+        try:
+            keep_n = max(1, int(keep_recent))
+        except (TypeError, ValueError):
+            keep_n = KEEP_RECENT_RUNS
+        ordered = sorted(
+            runs,
+            key=lambda run: run_time(run) or datetime.min.replace(tzinfo=timezone.utc),
+            reverse=True,
+        )
+        protected = {run.get("id") for run in ordered[:keep_n] if run.get("id")}
+
+        # Learn ages and references from ALL runs first: entries without their
+        # own timestamp inherit the age of the run that recorded them.
+        article_times: dict[str, datetime | None] = {}
+        image_times: dict[str, datetime | None] = {}
+        reel_times: dict[str, datetime | None] = {}
+        refs: dict[str, dict[str, set]] = {"articles": {}, "images": {}, "reels": {}}
+        for run in runs:
+            run_id, stamp = run.get("id"), run_time(run)
+            for key in (run.get("articles") or {}):
+                article_times.setdefault(str(key), stamp)
+                refs["articles"].setdefault(str(key), set()).add(run_id)
+            for key in (run.get("images") or {}):
+                image_times.setdefault(str(key), stamp)
+                refs["images"].setdefault(str(key), set()).add(run_id)
+            for reel in run.get("reels") or []:
+                reel_id = reel.get("id") if isinstance(reel, dict) else None
+                if reel_id:
+                    reel_times.setdefault(str(reel_id), stamp)
+                    refs["reels"].setdefault(str(reel_id), set()).add(run_id)
+
+        def pinned(key: str, kind: str) -> bool:
+            return bool(refs[kind].get(key, set()) & protected)
+
+        def expired(stamp: datetime | None, hint: Any) -> bool:
+            stamp = stamp or _parse_time(hint)
+            return stamp is not None and stamp < cutoff
+
+        removed = {"runs": 0, "articles": 0, "images": 0, "reels": 0}
+
+        kept_runs: list[dict] = []
+        for run in runs:
+            if run.get("id") in protected or not expired(run_time(run), run.get("id")):
+                kept_runs.append(run)
+            else:
+                removed["runs"] += 1
+        data["runs"] = kept_runs
+
+        for kind, times in (("articles", article_times), ("images", image_times)):
+            entries = data.get(kind)
+            if isinstance(entries, dict):
+                for key in list(entries):
+                    if pinned(str(key), kind):
+                        continue
+                    stamp = _entry_time(entries[key]) or times.get(str(key))
+                    if expired(stamp, key):
+                        del entries[key]
+                        removed[kind] += 1
+
+        reels = data.get("reels")
+        if isinstance(reels, list):
+            kept_reels = []
+            for reel in reels:
+                reel_id = str(reel.get("id")) if isinstance(reel, dict) and reel.get("id") else ""
+                if reel_id and pinned(reel_id, "reels"):
+                    kept_reels.append(reel)
+                    continue
+                stamp = _entry_time(reel) or reel_times.get(reel_id)
+                if expired(stamp, reel_id or None):
+                    removed["reels"] += 1
+                else:
+                    kept_reels.append(reel)
+            data["reels"] = kept_reels
+
+        summary = {
+            "at": now.isoformat(),
+            "max_age_days": days,
+            "removed": removed,
+        }
+        data[PRUNED_AT_KEY] = now.isoformat()
+        data[LAST_PRUNE_KEY] = summary
+        if remote:
+            self._prune_remote(cutoff, protected)
+        return summary
 
     # ---------- dedupe ----------
     def is_seen(self, candidate: dict) -> bool:
@@ -362,6 +609,9 @@ class State:
     # ---------- writing ----------
     def record_run(self, run: dict) -> None:
         """Append one immutable, uniquely named record; never overwrite media."""
+        # Bound the in-memory ledger before each write; remote keys are pruned
+        # on load, where they are already enumerated.
+        self.prune()
         run = dict(run or {})
         now = _utc_now()
         stamp = now.strftime("%Y%m%dT%H%M%SZ")

@@ -8,8 +8,10 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
+import subprocess
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -41,17 +43,143 @@ def _vercel_options(token: str, store: str):
 
 
 def _is_expired(uploaded_at: Any, cutoff: datetime) -> bool:
-    """Tolerate SDK datetime objects (naive or aware) and ISO timestamp strings."""
-    if isinstance(uploaded_at, str):
+    """Tolerate SDK datetimes, ISO strings, epoch numbers and missing values.
+
+    An unknown age is *never* treated as expired — it is always safer to keep a
+    blob one more run than to delete live public media.
+    """
+    if uploaded_at is None or isinstance(uploaded_at, bool):
+        return False
+    if isinstance(uploaded_at, (int, float)):
         try:
-            uploaded_at = datetime.fromisoformat(uploaded_at.replace("Z", "+00:00"))
-        except ValueError:
+            uploaded_at = datetime.fromtimestamp(uploaded_at, tz=timezone.utc)
+        except (ValueError, OSError, OverflowError):
             return False
+    if isinstance(uploaded_at, str):
+        text = uploaded_at.strip()
+        try:
+            uploaded_at = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            try:
+                uploaded_at = datetime.strptime(text[:10], "%Y-%m-%d")
+            except ValueError:
+                return False
+    if isinstance(uploaded_at, date) and not isinstance(uploaded_at, datetime):
+        uploaded_at = datetime.combine(uploaded_at, datetime.min.time())
     if not isinstance(uploaded_at, datetime):
         return False
     if uploaded_at.tzinfo is None:
         uploaded_at = uploaded_at.replace(tzinfo=timezone.utc)
     return uploaded_at < cutoff
+
+
+def _field(item: Any, name: str, default: Any = None) -> Any:
+    """Read a blob attribute from either an SDK object or a dict page entry."""
+    if isinstance(item, dict):
+        return item.get(name, default)
+    return getattr(item, name, default)
+
+
+def _unpack_page(page: Any) -> tuple[list[Any], Any, Any]:
+    """Normalize a listing page to (items, next_cursor, pages)."""
+    if page is None:
+        return [], None, None
+    if isinstance(page, dict):
+        items = (page.get("items") or page.get("blobs")
+                 or page.get("objects") or page.get("results") or [])
+        cursor = (page.get("cursor") or page.get("next_cursor")
+                  or page.get("nextCursor"))
+        pages = page.get("pages")
+    else:
+        items = None
+        for attr in ("items", "blobs", "objects", "results"):
+            candidate = getattr(page, attr, None)
+            if isinstance(candidate, (list, tuple)):
+                items = candidate
+                break
+        if items is None and hasattr(page, "__iter__"):
+            items = list(page)
+        cursor = None
+        for attr in ("cursor", "next_cursor", "nextCursor"):
+            candidate = getattr(page, attr, None)
+            if candidate:
+                cursor = candidate
+                break
+        pages = getattr(page, "pages", None)
+    return list(items or []), cursor, pages
+
+
+def _iter_blob_items(blob: Any, prefix: str, *, max_pages: int = 1000):
+    """Yield every blob under ``prefix``, following cursors/pages.
+
+    The current Vercel SDK follows cursors inside ``query_blobs`` and returns a
+    flat iterator; older SDKs and HTTP wrappers return one page at a time (or
+    a ``.pages`` iterator). Accept all three shapes so retention never silently
+    stops at page one. A cursor loop guard prevents an infinite loop on a
+    misbehaving backend.
+    """
+    cursor: Any = None
+    seen: set[str] = set()
+    for _ in range(max(0, max_pages)):
+        kwargs = {"prefix": prefix}
+        if cursor:
+            kwargs["cursor"] = cursor
+        try:
+            page = blob.query_blobs(**kwargs)
+        except TypeError:
+            # Very old stubs do not accept a cursor keyword.
+            page = blob.query_blobs(prefix=prefix)
+        items, next_cursor, pages = _unpack_page(page)
+        yield from items
+        if pages is not None:
+            for subpage in pages:
+                sub_items, _, _ = _unpack_page(subpage)
+                yield from sub_items
+            return
+        if not next_cursor or str(next_cursor) in seen:
+            return
+        seen.add(str(next_cursor))
+        cursor = next_cursor
+
+
+def _blob_keys_to_skip(just_uploaded: dict[str, Any]) -> set[str]:
+    """Identifiers of the object we must never delete during this upload."""
+    skip: set[str] = set()
+    for value in just_uploaded.values():
+        if not isinstance(value, str) or not value:
+            continue
+        skip.add(value)
+        skip.add(value.rsplit("/", 1)[-1])  # SDK may return a full URL
+    return skip
+
+
+def _delete_blob_best_effort(blob: Any, key: str) -> bool:
+    try:
+        blob.delete_blob(key)
+        return True
+    except Exception as exc:
+        print(f"[publish] blob cleanup skipped {key}: {exc}")
+        return False
+
+
+def _prune_public_blobs(blob: Any, *, just_uploaded: dict[str, Any]) -> None:
+    """Delete public media older than the retention window, best effort."""
+    skip = _blob_keys_to_skip(just_uploaded)
+    cutoff = datetime.now(timezone.utc) - timedelta(days=MEDIA_TTL_DAYS)
+    try:
+        for item in _iter_blob_items(blob, PUBLIC_PREFIX):
+            key = _field(item, "pathname") or _field(item, "key") or _field(item, "url")
+            if not key:
+                continue
+            key = str(key)
+            if (key in skip or key.rsplit("/", 1)[-1] in skip
+                    or str(_field(item, "url") or "") in skip):
+                continue
+            if _is_expired(_field(item, "uploaded_at"), cutoff):
+                _delete_blob_best_effort(blob, key)
+    except Exception as exc:
+        # A listing outage must not fail the upload or the social publishes.
+        print(f"[publish] public blob cleanup skipped: {exc}")
 
 
 def _verify_public_url(url: str) -> bool:
@@ -81,40 +209,131 @@ def _already_published(manifest: dict, platform: str) -> bool:
     return bool(entry)
 
 
-# ---------- Vercel Blob (public media host) ----------
+# ---------- Netlify Blob + Edge Function (public media host) ----------
+NETLIFY_MEDIA_STORE = "reels-media"
+NETLIFY_SITE_URL = "https://bollywood-reel-generator.netlify.app"
+NETLIFY_MEDIA_TTL_DAYS = 7
+
+
+def _netlify_cli() -> list[str] | None:
+    """Locate the Netlify CLI (global binary, else the pinned local install)."""
+    exe = shutil.which("netlify")
+    if exe:
+        return [exe]
+    local = (Path(__file__).resolve().parent.parent / "node_modules" /
+             "netlify-cli" / "bin" / "run.js")
+    if local.exists():
+        return ["node", str(local)]
+    return None
+
+
+def _netlify_run(args: list[str], timeout: int = 300):
+    cli = _netlify_cli()
+    if cli is None:
+        return None
+    try:
+        return subprocess.run(cli + args, capture_output=True, text=True,
+                              timeout=timeout, encoding="utf-8", errors="replace")
+    except Exception as exc:
+        print(f"[publish] netlify CLI call failed: {type(exc).__name__}")
+        return None
+
+
+def _prune_netlify_media(just_uploaded: str) -> None:
+    """Delete media blobs older than the retention window; best effort."""
+    proc = _netlify_run(["blobs:list", NETLIFY_MEDIA_STORE, "--json"])
+    if proc is None or proc.returncode != 0:
+        return
+    try:
+        data = json.loads(proc.stdout or "[]")
+    except (TypeError, ValueError):
+        return
+    items = data if isinstance(data, list) else (data.get("blobs") or data.get("items") or [])
+    cutoff = time.time() - NETLIFY_MEDIA_TTL_DAYS * 86400
+    for item in items:
+        key = item if isinstance(item, str) else (item.get("key") or item.get("pathname"))
+        if not key or key == just_uploaded:
+            continue
+        uploaded = item.get("uploadedAt") or item.get("uploaded_at") if isinstance(item, dict) else None
+        if uploaded:
+            try:
+                from datetime import datetime
+                dt = datetime.fromisoformat(str(uploaded).replace("Z", "+00:00"))
+                if dt.timestamp() > cutoff:
+                    continue
+            except Exception:
+                continue  # unknown age: keep, never delete live media
+        else:
+            continue
+        _netlify_run(["blobs:delete", NETLIFY_MEDIA_STORE, str(key), "--force"])
+
+
+def upload_video_netlify(video_path: str | Path, manifest: dict) -> dict | None:
+    """Upload the MP4 to Netlify Blobs and return the Edge Function URL."""
+    token = os.environ.get("NETLIFY_AUTH_TOKEN", "").strip()
+    site = os.environ.get("NETLIFY_SITE_ID", "").strip()
+    if not (token and site) or _netlify_cli() is None:
+        return None
+    path = Path(video_path)
+    if not path.is_file():
+        return None
+    key = f"reels/{manifest.get('id') or 'reel'}.mp4"
+    proc = _netlify_run(["blobs:set", NETLIFY_MEDIA_STORE, key,
+                         "--input", str(path), "--force"], timeout=600)
+    if proc is None or proc.returncode != 0:
+        print(f"[publish] Netlify blob upload failed: {(proc.stderr or '')[-200:] if proc else 'no CLI'}")
+        return None
+    url = f"{NETLIFY_SITE_URL}/r/{key}"
+    if not _verify_public_url(url):
+        _netlify_run(["blobs:delete", NETLIFY_MEDIA_STORE, key, "--force"])
+        return None
+    _prune_netlify_media(just_uploaded=key)
+    return {"url": url, "pathname": key, "bytes": path.stat().st_size,
+            "provider": "netlify"}
+
+
+# ---------- Vercel Blob (public media host, optional fallback) ----------
 def upload_video(video_path: str | Path, video_cfg: dict, manifest: dict) -> dict | None:
-    """Upload the MP4 to the public Blob store and prune media older than 7 days."""
+    """Upload the MP4 to the public Blob store and prune media older than 7 days.
+
+    Returns the public URL only after it has been verified reachable; an
+    unverifiable upload is removed again so no unreferenced bytes accumulate.
+    Cleanup issues are logged and never fail the publish step.
+    """
     token = os.environ.get("BLOB_VIDEO_TOKEN", "").strip()
     store = os.environ.get("BLOB_VIDEO_STORE_ID", "").strip()
     opts = _vercel_options(token, store)
     if opts is None:
+        # Netlify is the default host; Vercel remains an optional fallback.
+        return upload_video_netlify(video_path, manifest)
+    path = Path(video_path)
+    if not path.is_file():
+        print(f"[publish] video file missing: {video_path}")
         return None
     try:
+        data = path.read_bytes()
+        name = f"{PUBLIC_PREFIX}{manifest.get('id') or 'reel'}.mp4"
         from vercel.api import session
         from vercel.blob import sync as blob
 
-        path = Path(video_path)
-        if not path.is_file():
-            print(f"[publish] video file missing: {video_path}")
-            return None
-        data = path.read_bytes()
-        name = f"{PUBLIC_PREFIX}{manifest.get('id') or 'reel'}.mp4"
         with session(service_options=[opts]):
             result = blob.put_blob(name, data, access="public", content_type="video/mp4")
-            url = getattr(result, "url", "")
-            pathname = getattr(result, "pathname", name)
+            url = getattr(result, "url", "") or ""
+            pathname = getattr(result, "pathname", name) or name
 
-            # Rolling one-week retention for public media only.
-            cutoff = datetime.now(timezone.utc) - timedelta(days=MEDIA_TTL_DAYS)
-            for item in blob.query_blobs(prefix=PUBLIC_PREFIX):
-                if item.pathname == name:
-                    continue
-                if _is_expired(getattr(item, "uploaded_at", None), cutoff):
-                    try:
-                        blob.delete_blob(item.pathname)
-                    except Exception as exc:
-                        print(f"[publish] blob cleanup skipped {item.pathname}: {exc}")
+            # Rolling one-week retention for public media only. Never delete
+            # the object uploaded a moment ago, whatever shape its metadata has.
+            _prune_public_blobs(blob, just_uploaded={
+                "name": name, "pathname": pathname, "url": url,
+            })
+
         if not _verify_public_url(url):
+            # Do not leave an unverifiable (and unpublished) blob behind.
+            try:
+                with session(service_options=[opts]):
+                    _delete_blob_best_effort(blob, pathname)
+            except Exception as exc:
+                print(f"[publish] cleanup of unverified blob skipped: {exc}")
             return None
         return {"url": url, "pathname": pathname, "bytes": len(data)}
     except Exception as exc:

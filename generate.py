@@ -14,6 +14,7 @@ import math
 import os
 import shutil
 import sys
+import time
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
@@ -38,6 +39,12 @@ from pipeline.utils import load_config, run, slugify, similarity, ensure_dir, to
 from pipeline.voice import synthesize, synthesize_natural, VoiceSynthesisError
 
 DEFAULT_CLI = r"C:\Users\MASHU\.agents\skills\hyperframes\scripts\plugin-cli.mjs"
+
+# Local retention limits. work/ is scratch; out/ only keeps a short tail of
+# deliverables. Both are bounded so a long-running CI job cannot fill the disk.
+OUT_KEEP = 10
+WORK_TTL_DAYS = 2
+OUT_SUFFIXES = (".mp4", ".manifest.json", ".debug.json")
 
 # QA flags that hard-reject a script *before* any TTS, image work or rendering.
 # Everything else (vague_pronoun, time_relative, clickbait, repeated_sentence,
@@ -86,6 +93,102 @@ def cap_size(path: Path) -> None:
          "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", str(temp)])
     if temp.exists() and temp.stat().st_size < size:
         temp.replace(path)
+
+
+def _mtime(path: Path) -> float:
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return 0.0
+
+
+def _safe_cleanup(fn, *args, **kwargs):
+    """Last-resort guard: housekeeping must never fail a render job."""
+    try:
+        return fn(*args, **kwargs)
+    except Exception as exc:
+        print(f"[cleanup] {getattr(fn, '__name__', 'cleanup')} failed: {exc}")
+        return None
+
+
+def cleanup_work(workdir: Path | str | None) -> None:
+    """Delete one finished ``work/<reel-id>/`` project directory.
+
+    Best effort by design: a permissions or race error is logged and swallowed
+    so housekeeping can never fail an otherwise successful render job.
+    """
+    if not workdir:
+        return
+    path = Path(workdir)
+    try:
+        if path.is_dir():
+            shutil.rmtree(path)
+            print(f"[cleanup] removed work dir {path.name}")
+    except Exception as exc:
+        print(f"[cleanup] could not remove work dir {path}: {exc}")
+
+
+def cleanup_work_root(work_root: Path | str, *, max_age_days: int = WORK_TTL_DAYS,
+                      skip: tuple[str, ...] | set[str] = ()) -> None:
+    """Sweep work dirs abandoned by failed runs (bounded local scratch).
+
+    A successful run deletes its own project dir immediately (see
+    ``cleanup_work``); this only catches leftovers from TTS/check/render
+    failures. Never touches a dir the caller is still using.
+    """
+    root = Path(work_root)
+    try:
+        if not root.is_dir():
+            return
+        cutoff = time.time() - max(0, max_age_days) * 86400
+        for child in root.iterdir():
+            try:
+                if not child.is_dir() or child.name in skip or _mtime(child) >= cutoff:
+                    continue
+                cleanup_work(child)
+            except Exception as exc:
+                print(f"[cleanup] work sweep skipped {child}: {exc}")
+    except Exception as exc:
+        print(f"[cleanup] work sweep skipped: {exc}")
+
+
+def cleanup_out(out_root: Path | str, keep: int = OUT_KEEP) -> None:
+    """Keep at most ``keep`` reel groups in out/ (MP4 + manifest + debug).
+
+    Groups are ranked by their newest file's mtime. Removing a group removes
+    all three sidecars together, and orphan sidecars (a render that never
+    produced an MP4) count towards the same cap so out/ stays bounded.
+    """
+    try:
+        root = Path(out_root)
+        if not root.is_dir():
+            return
+        stems: set[str] = set()
+        for suffix in OUT_SUFFIXES:
+            for path in root.glob(f"*{suffix}"):
+                if path.is_file():
+                    stems.add(path.name[: -len(suffix)])
+        if not stems:
+            return
+
+        def newest(stem: str) -> float:
+            return max(_mtime(root / f"{stem}{suffix}") for suffix in OUT_SUFFIXES)
+
+        ordered = sorted(stems, key=newest, reverse=True)
+        stale = ordered[max(0, keep):]
+        for stem in stale:
+            for suffix in OUT_SUFFIXES:
+                path = root / f"{stem}{suffix}"
+                try:
+                    if path.is_file():
+                        path.unlink()
+                except Exception as exc:
+                    print(f"[cleanup] could not remove {path}: {exc}")
+        if stale:
+            print(f"[cleanup] out/ retained {len(ordered) - len(stale)} "
+                  f"of {len(ordered)} reel group(s)")
+    except Exception as exc:
+        print(f"[cleanup] out/ retention skipped: {exc}")
 
 
 def _unique(items: list[str]) -> list[str]:
@@ -251,6 +354,8 @@ def main() -> int:
     parser.add_argument("--no-publish", action="store_true")
     parser.add_argument("--no-render", action="store_true")
     parser.add_argument("--local-state", action="store_true")
+    parser.add_argument("--keep-work", action="store_true",
+                        help="keep work/<reel-id>/ after a successful render (debugging)")
     args = parser.parse_args()
 
     cfg = load_config(HERE / "config.yaml")
@@ -283,6 +388,8 @@ def main() -> int:
 
     out_root = ensure_dir(HERE / "out")
     work_root = ensure_dir(HERE / "work")
+    _safe_cleanup(cleanup_work_root, work_root)
+    _safe_cleanup(cleanup_out, out_root, keep=OUT_KEEP)
     published_ids = []
     made = 0
     for item in selection:
@@ -383,6 +490,11 @@ def main() -> int:
             }},
             "reels": [manifest],
         })
+        # Housekeeping runs only after the run is safely recorded. Both helpers
+        # are best-effort: a cleanup failure must never fail the job.
+        if not args.keep_work:
+            _safe_cleanup(cleanup_work, workdir)
+        _safe_cleanup(cleanup_out, out_root, keep=OUT_KEEP)
         published_ids.append(manifest["id"])
         made += 1
 

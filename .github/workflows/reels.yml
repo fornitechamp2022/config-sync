@@ -76,11 +76,13 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: reels-${{ github.run_id }}
+          # Two days at ~6 runs/day keeps artifact storage under GitHub's
+          # 500 MB free budget. Work dirs are deleted after rendering.
+          retention-days: 2
           path: |
             out/*.mp4
             out/*.manifest.json
-            work/*/captions.json
-            work/*/words.json
+            out/*.debug.json
           if-no-files-found: warn
 
       - name: Notify on failure
