@@ -1,8 +1,35 @@
+# Generated media, renders and intermediate work
 work/
 out/
 state/
-node_modules/
 .hyperframes/
+
+# Python / Node / test caches
 __pycache__/
 *.pyc
+.pytest_cache/
+node_modules/
+
+# Logs, local scratch and audit output
+*.log
+pilot_*.txt
+
+# Generated media files (never commit article images, audio or MP4s)
+*.mp4
+*.png
+*.wav
+*.mp3
+
+# Local credentials and environment files — never commit secrets
 .env
+.env.*
+*.pem
+*.key
+*.p12
+credentials.json
+credentials*.json
+*token*.json
+service-account*.json
+
+# NOTE: bundled open-source fonts (assets/fonts/*.woff2) are intentionally
+# NOT ignored — the Noto Sans Devanagari OFL fonts are tracked source assets.

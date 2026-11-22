@@ -6,6 +6,19 @@ headline, an RSS lead and whole article paragraphs; a free machine-translation
 endpoint renders each sentence in Hindi and a free neural TTS voice supplies the
 narration and word timings. Only MT and TTS are called externally.
 
+> **Public repository.** This is a code-only project published for transparency
+> and reuse. No article bodies, images, audio, MP4s or secrets are committed —
+> see [CONTENT_POLICY.md](CONTENT_POLICY.md) and [SECURITY.md](SECURITY.md).
+
+## Documentation
+
+- [CONTENT_POLICY.md](CONTENT_POLICY.md) — what is/is not stored, transient use
+  of third-party news material, attribution and the takedown/contact process.
+- [SECURITY.md](SECURITY.md) — how to report vulnerabilities or exposed
+  secrets, the secret names used, and rotation guidance.
+- [QUALITY_REPORT.md](QUALITY_REPORT.md) — acceptance criteria, iteration
+  record and remaining manual steps.
+
 ## Pipeline
 
 ```
@@ -33,6 +46,20 @@ Every publishing step is optional: it runs only when its credentials are present
 in the environment, and successful platform IDs are written into the manifest
 ledger so a rerun never double-posts.
 
+### Scheduled runs, keep-alive and failure alerts
+
+The 6-hourly GitHub Actions workflow needs only `contents: read` and writes no
+git state. Two housekeeping behaviours keep the public setup dependable:
+
+- **Netlify keep-alive:** a workflow step makes a plain HTTPS GET to the Netlify
+  site so the app is never paused for inactivity (no manual login required). It
+  needs no credential at all and uses no build minutes.
+- **OneSignal failure notifications:** a workflow step sends a push alert on
+  failed runs so issues are noticed without watching CI. Both secrets are
+  configured and the API call is verified (HTTP 200). Delivery to a device
+  additionally requires the OneSignal app to have a push platform enabled and
+  at least one subscribed recipient — see `QUALITY_REPORT.md`.
+
 ## Layout
 
 | Path | Purpose |
@@ -52,7 +79,7 @@ ledger so a rerun never double-posts.
 | `pipeline/state.py` | append-only state (private Netlify Blobs or Vercel Blob, local JSON fallback) |
 | `pipeline/publish.py` | public Blob video, YouTube Shorts and Instagram Reels |
 | `assets/fonts/` | bundled Noto Sans Devanagari (OFL) |
-| `.github/workflows/reels.yml` | 6-hourly scheduled run (cron + manual dispatch) |
+| `.github/workflows/reels.yml` | 6-hourly run (cron + manual dispatch), Netlify keep-alive, OneSignal alerts |
 | `tests/test_state_publish.py` | offline unit tests for state, publish and the workflow YAML |
 | `tests/test_netlify_state.py` | offline tests for the Netlify Blobs state backend |
 | `QUALITY_REPORT.md` | acceptance criteria, iteration record and remaining manual steps |
@@ -112,19 +139,29 @@ Netlify is used for state only; Vercel remains available for public MP4s.
 
 ## GitHub Actions secrets
 
-| Secret | Needed for |
-|---|---|
-| `NETLIFY_AUTH_TOKEN`, `NETLIFY_SITE_ID` | private Netlify Blobs state (store `reel-state`) |
-| `BLOB_STATE_TOKEN`, `BLOB_STATE_STORE_ID` | private Vercel Blob state (legacy backend) |
-| `BLOB_VIDEO_TOKEN`, `BLOB_VIDEO_STORE_ID` | public MP4 hosting (Vercel Blob) |
-| `YT_CLIENT_ID`, `YT_CLIENT_SECRET`, `YT_REFRESH_TOKEN` | YouTube Shorts |
-| `IG_LONG_LIVED_TOKEN`, `IG_USER_ID` | Instagram Reels |
+| Secret | Needed for | Status |
+|---|---|---|
+| `NETLIFY_AUTH_TOKEN`, `NETLIFY_SITE_ID` | private Netlify Blobs state (store `reel-state`) | configured |
+| `BLOB_STATE_TOKEN`, `BLOB_STATE_STORE_ID` | private Vercel Blob state (legacy backend) | add manually |
+| `BLOB_VIDEO_TOKEN`, `BLOB_VIDEO_STORE_ID` | public MP4 hosting (Vercel Blob) | add manually |
+| `YT_CLIENT_ID`, `YT_CLIENT_SECRET`, `YT_REFRESH_TOKEN` | YouTube Shorts | add manually |
+| `IG_LONG_LIVED_TOKEN`, `IG_USER_ID` | Instagram Reels | add manually |
+| `ONESIGNAL_APP_ID` | OneSignal failure notifications (app identifier) | configured |
+| `ONESIGNAL_REST_API_KEY` | OneSignal failure notifications (REST key used by the alert step) | configured |
+
+> **Remaining manual setup:** add the publishing secrets above as encrypted
+> GitHub Actions secrets. The OneSignal credentials are configured and the API
+> accepts test pushes, but the OneSignal app still needs a push platform
+> enabled and a subscribed device before alerts can actually be delivered.
+> All publishing steps skip cleanly without their credentials while the
+> workflow still produces MP4 artifacts.
 
 No secret is committed to the repo; all are injected as step environment
-variables. The workflow needs only `contents: read` and writes no git state.
-YouTube uploads default to **private** when `publish.verification_required` is
-true — flip it to `public` after review. Instagram needs a Professional account
-linked to a Facebook Page.
+variables. The workflow needs only `contents: read`, never puts tokens in argv
+or logs, and writes no git state. See [SECURITY.md](SECURITY.md) for rotation
+guidance. YouTube uploads default to **private** when
+`publish.verification_required` is true — flip it to `public` after review.
+Instagram needs a Professional account linked to a Facebook Page.
 
 ## Language behaviour
 
@@ -136,5 +173,8 @@ linked to a Facebook Page.
 ## Rights
 
 Headlines, article text and images belong to their publishers. The generator
-keeps only hashes/URLs in state and records the source in the manifest and on
-screen. Review usage rights before publishing commercially.
+uses them transiently for transformational news-commentary reels, keeps only
+hashes/URLs/IDs in state, and records the source URL in the manifest and the
+platform description. No scraped media is committed. See
+[CONTENT_POLICY.md](CONTENT_POLICY.md) for attribution and the takedown/contact
+process. Review usage rights before publishing commercially.
