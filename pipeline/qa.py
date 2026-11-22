@@ -2,12 +2,15 @@
 
 Flags describe the *spoken script*, not the source metadata. In particular a
 question mark in a headline that was never spoken is not a defect. New flags
-(``list_like``, ``low_entity_density``) are warnings, like the older non-critical
-flags; existing flag names are kept so downstream gates stay compatible.
+(``list_like``, ``low_entity_density``, ``repeated_entity``) are warnings, like
+the older non-critical flags; existing flag names are kept so downstream gates
+stay compatible. ``repeated_entity`` fires when one named entity phrase is
+spoken more than twice in a single brief.
 """
 from __future__ import annotations
 
 import re
+from collections import Counter
 
 from .utils import STOPWORDS
 
@@ -53,6 +56,29 @@ def _list_like(sentence: str) -> bool:
     short = [p for p in parts
              if len(re.findall(r"\w+|[\u0900-\u097f]+", p)) <= 4]
     return len(short) >= 4
+
+
+def _max_entity_repeats(story: dict) -> int:
+    """How often a single named entity phrase is spoken in the brief.
+
+    ``build_story`` records the count while admitting whole sentences and carries
+    it through translation. For hand-built scripts without that metadata we
+    fall back to counting capitalised names directly in the English text.
+    """
+    recorded = story.get("max_entity_repeats")
+    if recorded is not None:
+        try:
+            return int(recorded)
+        except (TypeError, ValueError):
+            pass
+    if story.get("language") != "en":
+        return 0  # transliterated names have no reliable word boundary
+    names = [
+        name for name in _CAP_NAME.findall(story.get("script", ""))
+        if name.split()[0].lower() not in COMMON_SENTENCE_START
+        and name.split()[0].lower() not in STOPWORDS
+    ]
+    return max(Counter(n.lower() for n in names).values(), default=0)
 
 
 def _entity_density(story: dict) -> float:
@@ -119,7 +145,12 @@ def flags(story: dict, cfg: dict) -> list[str]:
     if len(sentences) >= 4 and _entity_density(story) < 0.5:
         out.append("low_entity_density")
 
+    if _max_entity_repeats(story) > 2:
+        out.append("repeated_entity")
+
     wc = story.get("word_count", 0)
-    if wc and not (int(cfg["story"]["min_words"]) - 15 <= wc <= int(cfg["story"]["max_words"]) + 20):
+    # Lower band matches build_story's floor for a strict 2-4 body sentence
+    # brief: a tight four-sentence story may land 35 words under the target.
+    if wc and not (int(cfg["story"]["min_words"]) - 35 <= wc <= int(cfg["story"]["max_words"]) + 20):
         out.append("word_count_out_of_range")
     return out

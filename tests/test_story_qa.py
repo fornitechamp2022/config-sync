@@ -7,7 +7,10 @@ import pytest
 
 import pipeline.translate as translate_mod
 from pipeline.qa import flags
-from pipeline.story import _anchors, _resolve_pronouns, build_story, to_hindi
+from pipeline.story import (
+    HINDI_TRANSITIONS, _anchors, _order_body, _relatedness, _resolve_pronouns,
+    _topic_tokens, _transition_phrase, build_story, to_hindi,
+)
 
 
 def _cfg() -> dict:
@@ -298,7 +301,14 @@ def test_word_count_band_english_and_hindi():
 def test_hindi_adds_whole_sentences_when_translation_short(monkeypatch):
     en = build_story(_article(), _cfg())
     assert en is not None
-    assert en["extra_body"], "fixture should leave unused clean sentences"
+    assert len(en["selected_body"]) >= 3
+    # Leave room for variance correction: a finished brief already has four
+    # body sentences, and to_hindi may only add whole sentences up to that cap.
+    cta = en["sentences"][-1]
+    context = en["sentences"][1]
+    en["sentences"] = [en["hook"], context, *en["selected_body"][:2], cta]
+    en["extra_body"] = en["selected_body"][2:]
+    assert en["extra_body"]
 
     def short_translate(text: str, src: str = "en", tgt: str = "hi") -> str:
         words = re.sub(r"[.!?]+$", "", text).split()
@@ -307,6 +317,7 @@ def test_hindi_adds_whole_sentences_when_translation_short(monkeypatch):
     monkeypatch.setattr(translate_mod, "translate", short_translate)
     hi = to_hindi(en, _cfg())
     assert len(hi["sentences"]) > len(en["sentences"])
+    assert 5 <= len(hi["sentences"]) <= 7  # still hook/context + 2-4 body + CTA
     assert all(s.endswith("।") for s in hi["sentences"])
 
 
@@ -463,3 +474,138 @@ def test_in_memory_14_day_audit_meets_every_target():
 
     assert len({s["source"] for s in scripts}) >= 4
     assert all(s["sentences"][-1].endswith("।") for s in scripts)
+
+
+# --- iteration 7 acceptance: shape, ordering, transitions, entity repeats ----
+
+STRICT_CFG = {
+    **_cfg(),
+    "story": {**_cfg()["story"], "min_words": 110, "max_words": 165},
+}
+
+
+def _titles() -> list[str]:
+    return [
+        "Salman Khan Bigg Boss 20 eviction episode 78",
+        "Salman Khan eviction twist in Bigg Boss 20",
+        "Bigg Boss 20 eviction: Salman Khan announces surprise",
+        "Salman Khan and Kanika Bigg Boss 20 eviction night",
+        "Bigg Boss 20 eviction: Salman Khan reviews the task",
+        "Salman Khan eviction special on Bigg Boss 20",
+        "Bigg Boss 20 captaincy task leaves Kanika upset",
+        "Salman Khan discusses the Bigg Boss 20 finale",
+        "Qazi Touqeer and Salman Khan in Bigg Boss 20",
+        "Bigg Boss 20: Salman Khan warns the contestants",
+        "Kanika and Salman Khan eviction drama in Bigg Boss 20",
+        "Bigg Boss 20 Weekend Ka Vaar eviction highlights",
+    ]
+
+
+def test_every_retained_script_has_hook_context_body_cta_shape():
+    built = 0
+    for title in _titles():
+        en = build_story(_article(title=title), STRICT_CFG)
+        if en is None:
+            continue  # a weak source is skipped, never padded to fit the shape
+        built += 1
+        for story in (en, to_hindi(en, STRICT_CFG)):
+            sentences = story["sentences"]
+            assert 5 <= len(sentences) <= 7, (title, len(sentences))
+            assert sentences[0] == story["hook"]
+            assert 2 <= len(sentences) - 3 <= 4, "2-4 body sentences"
+            assert "Follow for more Bollywood updates" in sentences[-1] or \
+                sentences[-1].endswith("।")
+            for flag in TARGET_FLAGS:
+                assert flag not in flags(story, STRICT_CFG), (title, flag)
+    assert built >= 10
+
+
+def test_no_entity_phrase_is_spoken_more_than_twice():
+    cfg = _cfg()
+    en = build_story(_article(), cfg)
+    assert en is not None
+    assert en["max_entity_repeats"] <= 2
+    assert "repeated_entity" not in flags(en, cfg)
+    for phrase in ("salman khan", "bigg boss 20"):
+        assert en["script"].lower().count(phrase) <= 2
+    hi = to_hindi(en, cfg)
+    assert hi["max_entity_repeats"] == en["max_entity_repeats"]
+    assert "repeated_entity" not in flags(hi, cfg)
+
+    synthetic = {
+        "script": "Salman Khan met Salman Khan and Salman Khan spoke.",
+        "hook": "Salman Khan met Salman Khan.",
+        "sentences": ["Salman Khan met Salman Khan."] * 5,
+        "word_count": 25,
+        "language": "en",
+        "max_entity_repeats": 3,
+    }
+    assert "repeated_entity" in flags(synthetic, cfg)
+
+
+def test_body_ordering_groups_sub_events_instead_of_jumping():
+    eviction_1 = (
+        "Salman Khan reviewed the eviction and the nomination task during "
+        "the weekend episode."
+    )
+    health_1 = (
+        "A city hospital confirmed the actor's planned health checkup after "
+        "the show."
+    )
+    eviction_2 = (
+        "The eviction round left the captaincy race open before the final "
+        "announcement."
+    )
+    health_2 = "The hospital staff said the health checkup was routine and short."
+    body = [eviction_1, health_1, eviction_2, health_2]
+    ordered = _order_body(body, "Salman Khan Bigg Boss 20 eviction episode")
+    assert ordered == [eviction_1, eviction_2, health_1, health_2]
+    assert _relatedness(_topic_tokens(eviction_1), _topic_tokens(eviction_2)) > 0
+
+
+def test_transition_is_deterministic_and_only_when_needed():
+    cfg = _cfg()
+    en = build_story(_article(), cfg)
+    assert en is not None
+
+    with_transition = dict(en, needs_transition=True, transition_index=2)
+    hi = to_hindi(with_transition, cfg)
+    assert any(hi["sentences"][2].startswith(p) for p in HINDI_TRANSITIONS)
+    # Same seed -> same connector; the connector is not a new sentence.
+    assert to_hindi(dict(en, needs_transition=True, transition_index=2),
+                    cfg)["sentences"][2] == hi["sentences"][2]
+    assert len(hi["sentences"]) == len(en["sentences"])
+    assert all(s.endswith("।") for s in hi["sentences"])
+    assert "too_few_sentences" not in flags(hi, cfg)
+
+    without = to_hindi(dict(en, needs_transition=False), cfg)
+    assert not any(without["sentences"][2].startswith(p)
+                   for p in HINDI_TRANSITIONS)
+    assert _transition_phrase(en["hook"]) in HINDI_TRANSITIONS
+
+
+def test_12_script_audit_has_breadth_and_clean_shape():
+    cfg = _cfg()
+    outlets = ["ABP News", "Indian Express", "Hindustan Times", "India TV News",
+               "Outlook India", "Times Now", "News18", "Deccan Chronicle",
+               "Filmibeat", "Zoom News", "Republic World", "Bollywood Hungama"]
+    scripts = []
+    for title, source in zip(_titles(), outlets):
+        article = _article(
+            title=title,
+            description=(f"{title} was discussed in the latest episode and "
+                         "the audience shared strong views with the makers."),
+        )
+        article["source"] = source
+        en = build_story(article, cfg)
+        assert en is not None, title
+        hi = to_hindi(en, cfg)
+        for story in (en, hi):
+            assert 5 <= len(story["sentences"]) <= 7
+            assert 2 <= len(story["sentences"]) - 3 <= 4
+            for flag in TARGET_FLAGS:
+                assert flag not in flags(story, cfg), (title, flag, story["script"])
+        scripts.append(hi)
+
+    assert len(scripts) == 12
+    assert len({s["source"] for s in scripts}) >= 5

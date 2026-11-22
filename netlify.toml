@@ -1,21 +1,16 @@
-# Netlify configuration for public MP4 hosting.
-#
-# Deliberately NO [build] section: the static site (subscribe page and
-# OneSignalSDKWorker.js) is deployed to this Netlify site by a separate
-# process. Declaring a build command or publish directory here would replace
-# those files. This file only registers the edge function and adds an alias.
+# Netlify config for public MP4 hosting.
+[build]
+  command = ""
+  publish = "public"
+  functions = "netlify/functions"
+  # Keep the experimental Edge Function sources out of bundling; the proven
+  # serverless function below serves the same public URL.
+  edge_functions = "netlify/edge-functions-disabled"
 
-# The path pattern itself provides the clean public URL, so the function sees
-# the original pathname and can read the blob key directly from it. No rewrite
-# is needed for /r/<key>, which also avoids invoking the function twice.
-[[edge_functions]]
-  path = "/r/*"
-  function = "video"
-
-# Friendly alias for the same bytes. The function also accepts the query form
-# /.netlify/edge-functions/video?key=<key> when called directly.
+# Clean public URL: /r/<blob key> -> serverless function, which streams the
+# MP4 from the reels-media Blob store with Range support.
 [[redirects]]
-  from = "/video/*"
-  to = "/r/:splat"
-  status = 301
+  from = "/r/*"
+  to = "/.netlify/functions/video?key=:splat"
+  status = 200
   force = true

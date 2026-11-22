@@ -158,18 +158,18 @@ def test_edge_source_is_valid_js_and_imports_only_netlify_blobs(js):
     assert 'getStore(STORE_NAME)' in source
 
 
-def test_netlify_toml_declares_edge_function_without_touching_static_site():
+def test_netlify_toml_declares_serverless_video_function_without_touching_static_site():
     assert tomllib is not None, "tomllib (Python 3.11+) is required"
     data = tomllib.loads(TOML.read_text(encoding="utf-8"))
 
-    edges = data.get("edge_functions", [])
-    assert any(e.get("function") == "video" and e.get("path") == "/r/*"
-               for e in edges)
+    build = data.get("build", {})
+    # Static subscribe page + worker are published from public/; the function
+    # source lives outside that directory.
+    assert build.get("publish") == "public"
+    assert build.get("functions") == "netlify/functions"
     redirects = data.get("redirects", [])
-    assert any(r.get("from") == "/video/*" and r.get("to") == "/r/:splat"
-               and r.get("status") == 301 for r in redirects)
-    # A [build] section would replace the deployed subscribe page + service worker.
-    assert "build" not in data
+    assert any(r.get("from") == "/r/*" and "key=:splat" in r.get("to", "")
+               and r.get("status") == 200 for r in redirects)
 
 
 # --------------------------------------------------------------------------

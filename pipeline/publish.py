@@ -277,7 +277,9 @@ def upload_video_netlify(video_path: str | Path, manifest: dict) -> dict | None:
     path = Path(video_path)
     if not path.is_file():
         return None
-    key = f"reels/{manifest.get('id') or 'reel'}.mp4"
+    import re
+    reel_id = re.sub(r"[^A-Za-z0-9_-]+", "-", str(manifest.get("id") or "reel")).strip("-")[:80]
+    key = f"reels/{reel_id}.mp4"
     proc = _netlify_run(["blobs:set", NETLIFY_MEDIA_STORE, key,
                          "--input", str(path), "--force"], timeout=600)
     if proc is None or proc.returncode != 0:

@@ -299,6 +299,10 @@ def test_blob_record_run_is_unique_immutable_and_metadata_only(
 # Publish: optional / guarded
 # --------------------------------------------------------------------------
 def test_publish_steps_skip_when_env_absent(monkeypatch, tmp_path):
+    for name in ("BLOB_VIDEO_TOKEN", "BLOB_VIDEO_STORE_ID", "NETLIFY_AUTH_TOKEN",
+                 "NETLIFY_SITE_ID", "YT_CLIENT_ID", "YT_CLIENT_SECRET",
+                 "YT_REFRESH_TOKEN", "IG_LONG_LIVED_TOKEN", "IG_USER_ID"):
+        monkeypatch.delenv(name, raising=False)
     video = tmp_path / "reel.mp4"
     video.write_bytes(b"fake mp4")
     manifest = {"id": "reel-1", "story": {"headline": "H", "script": "S"}}

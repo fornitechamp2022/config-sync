@@ -64,6 +64,40 @@ NON_NAME_WORDS = frozenset({
 _NAMED_RE = re.compile(r"\b([A-Z][a-z]{2,}(?:\s+[A-Z][a-z]{2,})*)\b")
 _SUFFIX_RE = re.compile(r"(?:ing|ed|es|s)$")
 
+# Direct publisher feeds verified with `requests` on 2026-11-23: each returned
+# HTTP 200 and a parseable RSS document with items. They supplement (never
+# replace) ``config.topic.direct_feeds`` so discovery still gains breadth if a
+# deployment's config.yaml predates them. Broken/HTML-only candidates (NDTV,
+# Firstpost, Zoom, Deccan Chronicle, Outlook, Pinkvilla) were deliberately NOT
+# added. Duplicate URLs are ignored, so config-defined feeds take precedence.
+VERIFIED_EXTRA_FEEDS = (
+    "https://www.news18.com/rss/bollywood.xml",
+    "https://www.news18.com/rss/entertainment.xml",
+)
+
+# Direct feeds often identify themselves by bare domain while Bing uses the
+# publisher's display name. Normalising both to one outlet label keeps quality
+# scoring and source-diversity counts honest.
+SOURCE_ALIASES = {
+    "indianexpress.com": "Indian Express",
+    "the indian express": "Indian Express",
+    "hindustantimes.com": "Hindustan Times",
+    "news18.com": "News18",
+    "timesofindia.indiatimes.com": "Times of India",
+    "the times of india": "Times of India",
+    "abplive.com": "ABP News",
+    "filmibeat.com": "FilmiBeat",
+    "bollywoodhungama.com": "Bollywood Hungama",
+}
+
+
+def normalize_source(source: str) -> str:
+    """Map bare domains / 'The X' variants to a canonical outlet label."""
+    value = clean_text(source or "").strip()
+    if not value:
+        return ""
+    return SOURCE_ALIASES.get(value.lower(), value)
+
 
 def _child_text(item, *names: str) -> str:
     for child in item:
@@ -216,7 +250,13 @@ def discover(cfg: dict) -> list[dict]:
     for query in topic.get("bing_queries", []):
         raw.extend(fetch_feed("https://www.bing.com/news/search",
                               {"q": query, "format": "rss", "mkt": "en-IN"}))
-    for feed in topic.get("direct_feeds", []):
+    # Config feeds first, then the verified extras; dict.fromkeys preserves
+    # order while dropping duplicates.
+    feeds = list(dict.fromkeys([
+        *(topic.get("direct_feeds", []) or []),
+        *VERIFIED_EXTRA_FEEDS,
+    ]))
+    for feed in feeds:
         raw.extend(fetch_feed(feed))
 
     # Collapse exact URL / title duplicates first, preferring the richer item.
@@ -238,7 +278,9 @@ def discover(cfg: dict) -> list[dict]:
         candidate = {
             "title": title,
             "url": canonical,
-            "source": item.get("source", "") or urlparse(url).netloc.replace("www.", ""),
+            "source": normalize_source(
+                item.get("source", "") or urlparse(url).netloc.replace("www.", "")
+            ),
             "description": item.get("description", ""),
             "pubdate": item.get("pubdate", ""),
             "published": dt.isoformat() if dt else "",

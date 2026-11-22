@@ -7,6 +7,8 @@ Indian entertainment pages and would otherwise leak into narration.
 from __future__ import annotations
 
 import re
+from collections import Counter, OrderedDict
+from math import ceil
 from urllib.parse import urljoin
 
 import requests
@@ -204,6 +206,58 @@ def article_quality(article: dict, cfg: dict) -> float:
     return round(bonus + length + images, 3)
 
 
+def _source_name(article: dict) -> str:
+    return (article.get("source") or "").strip() or "unknown"
+
+
+def _diverse_selection(ordered: list[dict], limit: int) -> list[dict]:
+    """Quality-first selection with a per-outlet ceiling.
+
+    A plain top-N by ``article_quality`` lets preferred outlets (which get a
+    scoring bonus) crowd out every other publication. We still take the best
+    article available at each step, but never more than ``cap`` from one outlet
+    while other accepted articles remain. A second pass fills any empty slots
+    so a small candidate pool is not wasted.
+    """
+    if limit <= 0 or not ordered:
+        return []
+    cap = max(2, ceil(limit / 6))  # 12 slots -> 2 per outlet -> room for 6+
+    selected: list[dict] = []
+    used: Counter = Counter()
+    for article in ordered:
+        if used[_source_name(article)] < cap:
+            selected.append(article)
+            used[_source_name(article)] += 1
+    if len(selected) < limit:
+        chosen = {id(a) for a in selected}
+        for article in ordered:
+            if len(selected) >= limit:
+                break
+            if id(article) not in chosen:
+                selected.append(article)
+                chosen.add(id(article))
+    return selected[:limit]
+
+
+def _interleave_by_source(selected: list[dict]) -> list[dict]:
+    """Round-robin the chosen articles so any prefix spans many outlets.
+
+    Downstream consumers build scripts in list order, so an interleaved list
+    keeps even a short sample (8-12 scripts) source-diverse instead of starting
+    with six stories from the same publication. Within each outlet the
+    quality-first order is preserved.
+    """
+    groups: OrderedDict[str, list[dict]] = OrderedDict()
+    for article in selected:
+        groups.setdefault(_source_name(article), []).append(article)
+    out: list[dict] = []
+    while any(groups.values()):
+        for source in list(groups):
+            if groups[source]:
+                out.append(groups[source].pop(0))
+    return out
+
+
 def enrich_and_gate(candidates: list[dict], cfg: dict, limit: int = 24) -> list[dict]:
     ordered = sorted(candidates,
                      key=lambda c: (c.get("quality", 0.0), c.get("published", "")),
@@ -220,4 +274,4 @@ def enrich_and_gate(candidates: list[dict], cfg: dict, limit: int = 24) -> list[
             accepted.append(article)
     accepted.sort(key=lambda a: (a.get("quality", 0.0), a.get("published", "")),
                   reverse=True)
-    return accepted[:limit]
+    return _interleave_by_source(_diverse_selection(accepted, limit))

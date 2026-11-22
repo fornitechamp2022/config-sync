@@ -19,9 +19,10 @@ Hard rules for this module:
 from __future__ import annotations
 
 import re
+from collections import Counter
 from datetime import datetime
 
-from .utils import clean_text, sentence_split, word_count, tokens, STOPWORDS
+from .utils import clean_text, sentence_split, word_count, tokens, sha1, STOPWORDS
 
 # Breadcrumb / metadata markers that must never reach the spoken script.
 META_MARKERS = (
@@ -223,6 +224,96 @@ def _repeats_entity(text: str, anchors: list[tuple[str, str]]) -> bool:
     return any(value >= 2 for value in counts.values())
 
 
+def _anchor_counts(text: str, anchors: list[tuple[str, str]]) -> Counter:
+    """Count non-overlapping named-entity phrases in *text*.
+
+    Configured names win over a longer capitalised run: in the hook
+    "Salman Khan Bigg Boss 20 eviction" the run "Salman Khan Bigg Boss" must
+    not hide the separate "Salman Khan" and "Bigg Boss 20" mentions, otherwise
+    the spoken-entity budget undercounts them.
+    """
+    spans: list[tuple[int, int, str, int]] = []
+    for name, _kind in anchors:
+        pattern = re.compile(r"(?<!\w)" + re.escape(name) + r"(?!\w)", re.I)
+        for match in pattern.finditer(text):
+            spans.append((match.start(), match.end(), name.lower(), 0))
+    for match in CAP_NAME.finditer(text):
+        name = match.group(1).strip()
+        if name.split()[0].lower() in SENTENCE_START_COMMON:
+            continue
+        spans.append((match.start(), match.end(), name.lower(), 1))
+    spans.sort(key=lambda item: (item[3], -(item[1] - item[0]), item[0]))
+    counts: Counter = Counter()
+    kept: list[tuple[int, int]] = []
+    for start, end, name, _priority in spans:
+        if any(not (end <= k[0] or start >= k[1]) for k in kept):
+            continue
+        kept.append((start, end))
+        counts[name] += 1
+    return counts
+
+
+def _topic_tokens(sentence: str) -> set[str]:
+    """Distinctive content words that identify the sub-event of a sentence."""
+    return {
+        word for word in re.findall(r"[a-z0-9]+", sentence.lower())
+        if len(word) > 3 and word not in STOPWORDS
+    }
+
+
+def _relatedness(a: set[str], b: set[str]) -> float:
+    """Overlap coefficient: short sub-event descriptions still match."""
+    if not a or not b:
+        return 0.0
+    return len(a & b) / min(len(a), len(b))
+
+
+def _importance(sentence: str) -> int:
+    """Event sentences outrank speculation/background sentences."""
+    low = sentence.lower()
+    score = sum(1 for word in EVENT_WORDS if word in low)
+    score -= sum(1 for word in BACKGROUND_WORDS if word in low)
+    return score
+
+
+def _order_body(body: list[str], context: str) -> list[str]:
+    """Chain body sentences by topic, then importance, then source order.
+
+    A plain importance sort interleaves unrelated sub-events (eviction, then a
+    health story, then back to the eviction). Starting from the context sentence
+    and repeatedly choosing the *most related remaining* sentence keeps each
+    sub-event together, while importance and publication order break ties so
+    the result still reads chronologically and by news value.
+    """
+    remaining = list(body)
+    previous = _topic_tokens(context)
+    ordered: list[str] = []
+    while remaining:
+        best_index, best_key = 0, None
+        for index, sentence in enumerate(remaining):
+            key = (
+                round(_relatedness(previous, _topic_tokens(sentence)), 4),
+                _importance(sentence),
+                -index,  # earlier source order wins ties -> chronology
+            )
+            if best_key is None or key > best_key:
+                best_index, best_key = index, key
+        chosen = remaining.pop(best_index)
+        ordered.append(chosen)
+        previous = _topic_tokens(chosen)
+    return ordered
+
+
+# Fixed, fact-free Hindi connectors. They signal a move from context to body
+# without asserting any new event, name, time or cause.
+HINDI_TRANSITIONS = ("इसके अलावा,", "साथ ही,", "और")
+
+
+def _transition_phrase(seed: str) -> str:
+    """Deterministically pick a connector from the fixed template list."""
+    return HINDI_TRANSITIONS[int(sha1(seed)[:2], 16) % len(HINDI_TRANSITIONS)]
+
+
 def _opening(text: str, words: int = 4) -> tuple[str, ...]:
     """Leading tokens, used to catch a lead that merely echoes the headline."""
     return tuple(re.findall(r"[a-z0-9]+", text.lower())[:words])
@@ -325,8 +416,8 @@ def build_story(article: dict, cfg: dict) -> dict | None:
             continue
         if source and source in low:
             continue
-        if len(entities & set(re.findall(r"[a-z0-9]+", low))) < 2:
-            continue  # topic drift guard: need 2 headline entities
+        if len(entities & set(re.findall(r"[a-z0-9]+", low))) < 1:
+            continue  # topic drift guard: paragraph must share a headline entity
         for raw in sentence_split(para):
             sentence = clean(raw)
             if not (45 <= len(sentence) <= 320):
@@ -354,39 +445,35 @@ def build_story(article: dict, cfg: dict) -> dict | None:
             return None
         return resolved
 
+    # A named entity may be spoken at most twice in the whole brief. Checking
+    # this as sentences are admitted (not after assembly) keeps the cap
+    # deterministic and never requires rewriting a sentence to invent a
+    # pronoun or synonym.
+    entity_counts: Counter = Counter()
+
+    def accept(sentence: str, seen: list[str]) -> str | None:
+        prepared = prepare(sentence, seen)
+        if not prepared:
+            return None
+        mentions = _anchor_counts(prepared, anchors)
+        if any(entity_counts[name] + count > 2 for name, count in mentions.items()):
+            return None
+        entity_counts.update(mentions)
+        return prepared
+
     seen: list[str] = []
-    headline_ok = prepare(headline_clean, seen)
+    headline_ok = accept(headline_clean, seen)
     if headline_ok:
         seen.append(headline_ok)
-    lead_ok = prepare(lead, seen) if lead else None
+    lead_ok = accept(lead, seen) if lead else None
     if lead_ok:
         seen.append(lead_ok)
     body_ok: list[str] = []
     for sentence in body_raw:
-        prepared = prepare(sentence, seen)
+        prepared = accept(sentence, seen)
         if prepared:
             body_ok.append(prepared)
             seen.append(prepared)
-
-    def narrative_score(sentence: str) -> int:
-        """Event sentences first, then background; ties keep source order.
-
-        A stable sort means sentences of equal importance stay in the order the
-        publisher told them, which is the closest thing to chronology we have
-        without inventing dates.
-        """
-        low = sentence.lower()
-        mentioned = {name.lower() for _s, _e, name, _kind
-                     in _entity_mentions(sentence, anchors)}
-        score = len(mentioned & {e.lower() for e in entities})
-        if any(word in low for word in EVENT_WORDS):
-            score += 2
-        if any(word in low for word in BACKGROUND_WORDS):
-            score -= 1
-        return score
-
-    # Stable sort: importance desc, publication order as the tie-breaker.
-    body_ok.sort(key=narrative_score, reverse=True)
 
     if headline_ok:
         hook, lead_sentence = headline_ok, lead_ok
@@ -397,44 +484,61 @@ def build_story(article: dict, cfg: dict) -> dict | None:
     else:
         return None
 
+    # Group related sub-events together and order them by importance/chronology
+    # instead of scattering them with a flat importance sort.
+    body_ok = _order_body(body_ok, lead_sentence or hook)
+
     cta = _punctuate(scfg["cta"])
     min_words = int(scfg["min_words"])
     max_words = int(scfg["max_words"])
-    # Keep one spare sentence: post-translation dedupe may remove a duplicate.
-    required_sentences = max(6, int(scfg.get("min_sentences", 4)) + 2)
+    # hook + context + at least 2 body + CTA is the shortest spoken shape QA
+    # accepts; five sentences is also the floor enforced by ``qa.flags``.
+    required_sentences = max(5, int(scfg.get("min_sentences", 4)) + 1)
     upper = max_words - 5
     target = (min_words + max_words) / 2
     base = [hook] + ([lead_sentence] if lead_sentence else [])
 
     # Choose a whole-sentence prefix closest to the target band. Larger
     # prefixes add sentences; smaller prefixes drop trailing ones -- never a
-    # partial sentence.
-    # A news brief is hook + context + 2-4 body sentences + CTA. Only fall back
-    # to a longer body when four sentences cannot reach the word floor.
-    cap = len(body_ok)
-    if word_count(" ".join(base + body_ok[:4] + [cta])) >= min_words - 10:
-        cap = 4
+    # partial sentence. The body is *always* 2-4 sentences: a longer run reads
+    # like a listicle and breaks the hook -> context -> body -> CTA shape.
+    # Sources whose four best body sentences cannot reach the word floor are
+    # rejected rather than padded with weak, unrelated material.
+    cap = min(len(body_ok), 4)
+    if cap < 2:
+        return None
 
     best: tuple[int, list[str], int] | None = None
-    for k in range(cap + 1):
+    for k in range(2, cap + 1):
         candidate = base + body_ok[:k] + [cta]
         count = word_count(" ".join(candidate))
         if count > upper:
             break
         if len(candidate) < required_sentences:
             continue
-        # A tight hook + context + 2-4 body + CTA reads as a story, not a
-        # listicle. Prefer that shape when it still hits the word target.
-        score = abs(count - target) - (3 if 2 <= k <= 4 else 0)
+        score = abs(count - target)
         if best is None or score < best[0]:
             best = (score, candidate, count)
-    if best is None or best[2] < min_words - 15:
+    # Four short, clean sentences may total slightly under the configured
+    # target. A 35-word tolerance still guarantees a substantial brief while
+    # preserving the required shape (and matches QA's lower word band).
+    if best is None or best[2] < min_words - 35:
         return None  # source cannot produce a long enough clean script
 
     sentences = best[1]
     script = " ".join(sentences)
     selected = [s for s in sentences if s in body_ok]
     extra = [s for s in body_ok if s not in selected]
+
+    # A connector is only inserted when the context -> body jump is genuinely
+    # abrupt (no distinctive token in common). When the body already continues
+    # the context's sub-event, the transition would be clutter and is skipped.
+    context = lead_sentence or hook
+    first_body = selected[0] if selected else ""
+    needs_transition = bool(
+        first_body
+        and _relatedness(_topic_tokens(context), _topic_tokens(first_body)) < 0.15
+    )
     return {
         "headline": headline, "hook": hook, "script": script,
         "sentences": sentences, "word_count": word_count(script),
@@ -442,6 +546,9 @@ def build_story(article: dict, cfg: dict) -> dict | None:
         "published": article.get("published", ""), "tokens": tokens(script),
         "language": "en",
         "selected_body": selected, "extra_body": extra,
+        "needs_transition": needs_transition,
+        "transition_index": 2 if lead_sentence else 1,
+        "max_entity_repeats": max(entity_counts.values(), default=0),
     }
 
 
@@ -483,7 +590,7 @@ def to_hindi(story: dict, cfg: dict) -> dict:
             translated.append(rendered)
             seen.append(rendered)
 
-    min_words = int(cfg["story"]["min_words"]) - 15
+    min_words = int(cfg["story"]["min_words"]) - 35
     max_words = int(cfg["story"]["max_words"]) + 20
 
     def count(items: list[str]) -> int:
@@ -491,8 +598,13 @@ def to_hindi(story: dict, cfg: dict) -> dict:
 
     total = count(translated)
     remaining_extra = list(story.get("extra_body", []))
+    first_body = int(story.get("transition_index", 2))
 
     def add_extra() -> bool:
+        # Correct translation variance with whole prepared sentences, but never
+        # past four body sentences -- the hook/context/body/CTA shape is fixed.
+        if len(translated) - 1 - first_body >= 4:
+            return False
         while remaining_extra:
             rendered = _translate_sentence(remaining_extra.pop(0), seen)
             if not rendered:
@@ -518,6 +630,15 @@ def to_hindi(story: dict, cfg: dict) -> dict:
     # Never fall below QA's five-sentence floor after dedupe.
     while len(translated) < 5 and add_extra():
         total += word_count(translated[-2])
+
+    # Deterministic, fact-free connector between context and body. It is part
+    # of the first body sentence (not a new sentence), so sentence counts,
+    # `।` boundaries and the CTA position are unchanged.
+    if story.get("needs_transition"):
+        index = int(story.get("transition_index", 2))
+        if 0 < index < len(translated) - 1:
+            phrase = _transition_phrase(story.get("hook", ""))
+            translated[index] = f"{phrase} {translated[index]}"
 
     script = " ".join(translated)
     return {

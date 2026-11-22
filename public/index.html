@@ -1,0 +1,38 @@
+﻿<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Alerts</title>
+<script src="https://cdn.onesignal.com/sdks/web/v16/OneSignalSDK.page.js" defer></script>
+<style>
+body{font-family:system-ui,sans-serif;background:#0b0b0e;color:#fff;display:grid;place-items:center;min-height:100vh;margin:0}
+button{background:#FFE600;color:#000;border:0;border-radius:10px;padding:14px 22px;font-size:17px;font-weight:700;cursor:pointer}
+#status{margin-top:16px;opacity:.8}
+</style>
+</head>
+<body>
+<div style="text-align:center">
+<h1>Enable failure alerts</h1>
+<p>Click below, then allow notifications in your browser.</p>
+<button id="enable">Enable alerts</button>
+<div id="status">Loading…</div>
+</div>
+<script>
+window.OneSignalDeferred = window.OneSignalDeferred || [];
+window.OneSignalDeferred.push(async function (OneSignal) {
+  await OneSignal.init({ appId: "94f3a766-8918-4b0e-a334-46fe111f7426" });
+  const status = document.getElementById("status");
+  const show = async () => {
+    const sub = OneSignal.User.PushSubscription;
+    status.textContent = sub.id ? "Subscribed: " + sub.id : "Not subscribed";
+  };
+  await show();
+  document.getElementById("enable").onclick = async function () {
+    await OneSignal.User.PushSubscription.optIn();
+    await show();
+  };
+});
+</script>
+</body>
+</html>

@@ -149,6 +149,8 @@ export function videoResponse(body, range) {
   };
 }
 
+export const config = { path: "/r/*" };
+
 export default async function handler(request, context) {
   const url = new URL(request.url);
   const key = keyFromUrl(url);

@@ -147,26 +147,96 @@ def write_project(workdir: str | Path, story: dict, voice: dict, captions: list[
         """
 
     # ---- shot clips + motion ----
-    shot_markup, tweens = [], []
+    # Three deterministic camera moves, cycled by shot index.  The cycle length
+    # (3) and its three distinct entries guarantee both acceptance properties:
+    # at least three different moves per reel, and never the same move on two
+    # consecutive shots.  Every tween is a fromTo at an absolute time on a child
+    # wrapper of the .clip host, so nothing here can trip
+    # gsap_animates_clip_element or the CSS-transform conflict rule.
+    camera_cycle = ("push", "pan", "punch")
+
+    def camera_move(index: int) -> dict:
+        kind = camera_cycle[index % len(camera_cycle)]
+        if kind == "push":
+            return {
+                "kind": kind,
+                "from": {"scale": 1.0, "x": 0, "y": 0},
+                "to": {"scale": 1.085, "x": 0, "y": -8},
+                "ease": "power2.inOut", "dur_factor": 1.0,
+            }
+        if kind == "pan":
+            return {
+                "kind": kind,
+                "from": {"scale": 1.055, "x": -30, "y": 0},
+                "to": {"scale": 1.055, "x": 30, "y": 0},
+                "ease": "sine.inOut", "dur_factor": 1.0,
+            }
+        # punch-in: a short accelerating snap that lands and holds
+        return {
+            "kind": kind,
+            "from": {"scale": 1.0, "x": 12, "y": 6},
+            "to": {"scale": 1.10, "x": 0, "y": 0},
+            "ease": "power3.out", "dur_factor": 0.78,
+        }
+
     total_shots = len(shots)
+    # The hero panel is the first shot that is fully visible once the hook card
+    # has cleared (~3.15 s).  It gets one extra, quick punch-in on a nested
+    # wrapper so the hero shot reads as a studio move, not a static still.
+    hero_index = 2 if total_shots > 2 else 0
+    shot_markup, tweens, dip_markup, dip_tweens = [], [], [], []
     for i, shot in enumerate(shots):
         start = round(i * shot_len, 2)
         dur = round(min(shot_len, duration - start), 2)
         if dur <= 0.4:
             break
         wrapper = f"shotmotion{i}"
-        direction = -1 if i % 2 == 0 else 1
+        move = camera_move(i)
+        move_dur = round(max(0.4, dur * move["dur_factor"]), 2)
+        frm, to = move["from"], move["to"]
+        img = (f'<img src="{shot["path"]}" alt="" '
+               'style="width:100%;height:100%;object-fit:cover" />')
+        inner = (f'<div id="heropunch" class="hero-punch">{img}</div>'
+                 if i == hero_index else img)
         shot_markup.append(f'''<div id="shot{i}" class="clip shot" data-start="{start}"
           data-duration="{dur}" data-track-index="0" style="z-index:{1 + i}">
-          <div id="{wrapper}" class="shot-motion">
-            <img src="{shot['path']}" alt="" style="width:100%;height:100%;object-fit:cover" />
+          <div id="{wrapper}" class="shot-motion" data-camera="{move['kind']}">
+            {inner}
           </div>
         </div>''')
         tweens.append(
-            f'tl.fromTo("#{wrapper}", {{scale:1.055,x:0,y:0}}, '
-            f'{{scale:1.0,x:{direction * 16},y:{-direction * 10},duration:{dur},'
-            f'ease:"power2.inOut",immediateRender:true}}, {start});'
+            f'tl.fromTo("#{wrapper}", '
+            f'{{scale:{frm["scale"]},x:{frm["x"]},y:{frm["y"]}}}, '
+            f'{{scale:{to["scale"]},x:{to["x"]},y:{to["y"]},duration:{move_dur},'
+            f'ease:"{move["ease"]}",immediateRender:true}}, {start});'
         )
+        if i == hero_index:
+            tweens.append(
+                'tl.fromTo("#heropunch", {scale:1}, '
+                f'{{scale:1.06,duration:0.38,ease:"power3.out",immediateRender:true}}, '
+                f'{round(start + 0.25, 2)});'
+            )
+        # Dip-to-dark on every third cut (a cut exists at the start of shots
+        # i >= 1).  It is a dedicated .clip whose *child* carries the opacity
+        # tween; the child starts at opacity:0 in CSS so check never sees a
+        # full-frame overlay appear before its first tween.
+        if i and i % 3 == 0:
+            dip_id = f"dip{i}"
+            dip_start = round(start - 0.06, 2)
+            dip_markup.append(f'''<div id="{dip_id}" class="clip dip-overlay"
+              data-start="{dip_start}" data-duration="0.24" data-track-index="8"
+              style="z-index:90" data-layout-allow-occlusion>
+              <div id="{dip_id}inner" class="dip-inner"></div>
+            </div>''')
+            dip_tweens.append(
+                f'tl.fromTo("#{dip_id}inner", {{opacity:0}}, '
+                f'{{opacity:0.55,duration:0.07,ease:"power2.in",'
+                f'immediateRender:true}}, {dip_start});'
+            )
+            dip_tweens.append(
+                f'tl.to("#{dip_id}inner", {{opacity:0,duration:0.14,'
+                f'ease:"power2.out"}}, {round(dip_start + 0.08, 2)});'
+            )
 
     # ---- hook title card (short display form; full headline is spoken) ----
     hook_words = story["hook"].split()
@@ -210,6 +280,7 @@ def write_project(workdir: str | Path, story: dict, voice: dict, captions: list[
       <div id="lowerpanel" class="lower-panel">
         <span id="lowerlabel" class="lower-label">{_esc(ui['lower_label'])}</span>
         <div id="lowerinner" class="lower-inner">{_esc(headline)}</div>
+        <div id="lowerpulse" class="lower-pulse"></div>
       </div>
     </div>
     <div id="ticker" class="clip" data-start="0" data-duration="{duration}"
@@ -254,6 +325,9 @@ def write_project(workdir: str | Path, story: dict, voice: dict, captions: list[
     # Everything is a fromTo/to at absolute times; the first 0.8 s is the
     # graphic package assembling itself, the last second is a quiet exit.
     outro_at = round(max(0.0, duration - 1.1), 2)
+    # One subtle lower-third highlight pulse per reel, on a child element only.
+    pulse_at = round(min(max(0.0, duration - 1.6),
+                         max(1.2, shot_len * 4 + 0.12)), 2)
     audio_js = "\n".join([
         f'tl.fromTo("#breakinginner", {{y:-46,opacity:0}}, '
         f'{{y:0,opacity:1,duration:0.45,ease:"power4.out"}}, 0.05);',
@@ -269,9 +343,15 @@ def write_project(workdir: str | Path, story: dict, voice: dict, captions: list[
         f'{{y:0,opacity:1,duration:0.34,ease:"power3.out"}}, 0.56);',
         f'tl.fromTo("#progressbar", {{scaleX:0}}, '
         f'{{scaleX:1,duration:{duration},ease:"none"}}, 0);',
+        f'tl.fromTo("#lowerpulse", {{opacity:0}}, '
+        f'{{opacity:0.9,duration:0.12,ease:"power2.out",immediateRender:true}}, {pulse_at});',
+        f'tl.to("#lowerpulse", {{opacity:0,duration:0.28,ease:"power2.in"}}, '
+        f'{round(pulse_at + 0.16, 2)});',
         f'tl.to("#lowerpanel", {{opacity:0,y:-18,duration:0.7,ease:"power2.in"}}, {outro_at});',
         f'tl.to("#tickerinner", {{opacity:0,y:18,duration:0.6,ease:"power2.in"}}, {outro_at});',
-    ] + tweens)
+        f'tl.to("#breakinginner", {{opacity:0,y:-18,duration:0.55,ease:"power2.in"}}, {outro_at});',
+        f'tl.to("#bugpanel", {{opacity:0,y:-14,duration:0.5,ease:"power2.in"}}, {outro_at});',
+    ] + tweens + dip_tweens)
 
     index_html = f'''<!doctype html>
 <html lang="en">
@@ -286,7 +366,12 @@ html,body{{width:{width}px;height:{height}px;overflow:hidden;background:#05070D}
 #root{{position:absolute;inset:0;font-family:{ui['font']};color:#fff;
   --news-red:#E11D2E;--news-yellow:#FFE600;--news-navy:#0A0F1E;--news-ink:#05070D}}
 .shot{{position:absolute;inset:0;overflow:hidden}}
-.shot-motion{{position:absolute;inset:-2%;will-change:transform}}
+/* Extra bleed keeps the frame filled during lateral pans and punch-ins. */
+.shot-motion{{position:absolute;inset:-5%;will-change:transform}}
+.hero-punch{{position:absolute;inset:0;will-change:transform}}
+/* Dip-to-dark transition: a full-frame child that only the timeline lights. */
+.dip-overlay{{position:absolute;inset:0;pointer-events:none}}
+.dip-inner{{position:absolute;inset:0;background:#000;opacity:0;will-change:opacity}}
 .hook-inner{{position:absolute;left:150px;right:250px;top:430px;text-align:center}}
 .hook-kicker{{font-size:30px;font-weight:900;letter-spacing:.14em;color:var(--news-yellow);
   margin-bottom:18px;text-shadow:0 3px 12px #000}}
@@ -328,6 +413,9 @@ html,body{{width:{width}px;height:{height}px;overflow:hidden;background:#05070D}
   letter-spacing:.08em;padding:5px 12px;border-radius:3px;margin-bottom:10px}}
 .lower-inner{{font-size:32px;font-weight:800;line-height:1.18;color:#fff;
   text-shadow:0 3px 10px #000;overflow-wrap:anywhere}}
+/* One-beat highlight pulse on the lower-third (child only, starts hidden). */
+.lower-pulse{{position:absolute;left:0;bottom:0;height:6px;width:100%;
+  background:var(--news-yellow);opacity:0;transform-origin:left center}}
 
 /* Ticker strip: short phrases taken from the script itself */
 .ticker-band{{position:absolute;left:0;right:0;top:1188px;height:54px;
@@ -348,6 +436,7 @@ html,body{{width:{width}px;height:{height}px;overflow:hidden;background:#05070D}
 <div id="root" data-composition-id="main" data-start="0" data-duration="{duration}"
   data-width="{width}" data-height="{height}">
 {chr(10).join(shot_markup)}
+{chr(10).join(dip_markup)}
 {hook_markup}
 {graphics_markup}
 {caption_host}

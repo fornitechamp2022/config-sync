@@ -7,8 +7,14 @@ from html import escape
 
 import pipeline.articles as articles_mod
 import pipeline.sources as sources_mod
-from pipeline.articles import article_quality, enrich_and_gate, fetch_article
-from pipeline.sources import _event_signature, _same_event, discover, source_quality
+from pipeline.articles import (
+    _diverse_selection, _interleave_by_source, article_quality, enrich_and_gate,
+    fetch_article,
+)
+from pipeline.sources import (
+    VERIFIED_EXTRA_FEEDS, _event_signature, _same_event, discover,
+    normalize_source, source_quality,
+)
 
 
 def _cfg() -> dict:
@@ -200,3 +206,76 @@ def test_article_quality_and_enrich_order(monkeypatch):
     ]
     result = enrich_and_gate(cands, cfg, limit=2)
     assert [a["source"] for a in result] == ["ABP News", "Unknown Blog"]
+
+
+# --- iteration 7 acceptance: verified feeds + source breadth -----------------
+
+def test_verified_extra_feeds_are_merged_without_duplicate_requests(monkeypatch):
+    cfg = _cfg()
+    # One verified feed is already configured; discovery must not fetch it twice.
+    cfg["topic"]["direct_feeds"] = [VERIFIED_EXTRA_FEEDS[0],
+                                     "https://example.com/configured"]
+    seen: list[str] = []
+
+    def fake_fetch(url, params=None):
+        seen.append(url)
+        if "example.com" in url:
+            item = _item("Salman Khan Bigg Boss 20 eviction", "ABP News", "abp")
+            return sources_mod._parse_xml(_rss([item]))
+        return []
+
+    monkeypatch.setattr(sources_mod, "fetch_feed", fake_fetch)
+    discover(cfg)
+    assert seen.count(VERIFIED_EXTRA_FEEDS[0]) == 1
+    assert all(feed in seen for feed in VERIFIED_EXTRA_FEEDS)
+
+
+def test_source_names_are_normalised_across_outlet_aliases():
+    assert normalize_source("indianexpress.com") == "Indian Express"
+    assert normalize_source("The Indian Express") == "Indian Express"
+    assert normalize_source("hindustantimes.com") == "Hindustan Times"
+    assert normalize_source("news18.com") == "News18"
+    assert normalize_source("ABP News") == "ABP News"
+
+
+def test_diverse_selection_and_interleaving_span_many_outlets():
+    ordered = [
+        {"source": f"Outlet {i}", "url_key": f"{i}-{j}", "quality": 10 - i}
+        for i in range(6) for j in range(4)
+    ]
+    selected = _diverse_selection(ordered, 12)
+    assert len(selected) == 12
+    assert len({a["source"] for a in selected}) == 6
+
+    interleaved = _interleave_by_source(selected)
+    assert len(interleaved) == 12
+    assert len({a["source"] for a in interleaved[:6]}) == 6
+    # Within one outlet the quality-first order is preserved.
+    assert [a["url_key"] for a in interleaved if a["source"] == "Outlet 0"] == [
+        "0-0", "0-1"
+    ]
+    # A small pool still fills every requested slot.
+    assert _diverse_selection(ordered[:2], 4) == ordered[:2]
+
+
+def test_enrich_and_gate_returns_an_interleaved_outlet_mix(monkeypatch):
+    cfg = _cfg()
+    mapping: dict[str, dict] = {}
+    candidates = []
+    for i in range(6):
+        for j in range(4):
+            url = f"https://o{i}-{j}.example.com"
+            mapping[url] = {
+                "source": f"Outlet {i}", "body": "x", "images": ["a"],
+                "published": "2026-11-21T10:00:00Z", "accepted": True,
+                "quality": 10 - i,
+            }
+            candidates.append({"url": url, "published": "2026-11-21T10:00:00Z",
+                               "quality": 10 - i})
+
+    monkeypatch.setattr(articles_mod, "fetch_article",
+                        lambda url, cfg, cand=None: mapping.get(url))
+    # A 12-script sample must span at least 5 distinct outlets.
+    result = enrich_and_gate(candidates, cfg, limit=12)
+    assert len(result) == 12
+    assert len({a["source"] for a in result}) >= 5
