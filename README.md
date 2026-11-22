@@ -54,6 +54,7 @@ ledger so a rerun never double-posts.
 | `assets/fonts/` | bundled Noto Sans Devanagari (OFL) |
 | `.github/workflows/reels.yml` | 6-hourly scheduled run (cron + manual dispatch) |
 | `tests/test_state_publish.py` | offline unit tests for state, publish and the workflow YAML |
+| `QUALITY_REPORT.md` | acceptance criteria, iteration record and remaining manual steps |
 
 ## Run locally
 
