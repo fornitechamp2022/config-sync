@@ -48,10 +48,10 @@ Publishing:
 - `IG_USER_ID`
 
 Failure notifications (OneSignal — step present in `.github/workflows/reels.yml`;
-both secrets configured, API call verified; device delivery still needs a push
-platform and subscriber in the OneSignal dashboard):
+both secrets configured, Web Push enabled, device subscribed, live delivery
+verified):
 
-- `ONESIGNAL_APP_ID` (configured — see `QUALITY_REPORT.md` for the remaining blocker)
+- `ONESIGNAL_APP_ID` (configured and verified)
 - `ONESIGNAL_REST_API_KEY` (the REST API key used by the notification step)
 
 Automation PAT (informational — **no PAT is currently used or required**): the

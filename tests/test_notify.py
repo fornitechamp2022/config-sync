@@ -1,14 +1,21 @@
 """Offline unit tests for the OneSignal failure notifier and workflow wiring.
 
-All HTTP traffic is mocked: no network calls and no real credentials are used.
+All HTTP traffic is mocked at the stdlib ``urllib.request.urlopen`` layer: no
+network calls and no real credentials are used. The notifier itself must be
+importable with no third-party packages installed, so nothing here patches or
+imports ``requests`` in the module under test.
 """
 from __future__ import annotations
 
+import json
+import os
+import subprocess
 import sys
+import tempfile
+import urllib.error
 from pathlib import Path
 
 import pytest
-import requests
 import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -34,8 +41,21 @@ ENV_KEYS = (
 
 
 class FakeResponse:
-    def __init__(self, status_code: int):
-        self.status_code = status_code
+    """Minimal stand-in for the object returned by urllib.request.urlopen."""
+
+    def __init__(self, status_code: int, body: bytes = b'{"id": "abc"}'):
+        self.status = status_code
+        self._body = body
+        self.closed = False
+
+    def getcode(self):
+        return self.status
+
+    def read(self):
+        return self._body
+
+    def close(self):
+        self.closed = True
 
 
 @pytest.fixture(autouse=True)
@@ -62,18 +82,29 @@ def set_github_context(monkeypatch):
 
 
 def capture_posts(monkeypatch, responses):
-    """Return a list that records (url, kwargs) for each call to requests.post."""
+    """Record (request, timeout) for each stdlib urlopen call.
+
+    Real ``urlopen`` raises ``HTTPError`` for non-2xx statuses, so the fake
+    reproduces that behaviour from the queued FakeResponse objects. Queued
+    exceptions (e.g. URLError) are raised verbatim to simulate transport
+    failures.
+    """
     calls = []
     queue = list(responses)
 
-    def fake_post(url, **kwargs):
-        calls.append((url, kwargs))
+    def fake_urlopen(request, timeout=None):
+        calls.append((request, timeout))
         result = queue.pop(0)
-        if isinstance(result, Exception):
+        if isinstance(result, BaseException):
             raise result
+        status = getattr(result, "status", 0)
+        if status >= 400:
+            raise urllib.error.HTTPError(
+                request.full_url, status, "error", {}, None
+            )
         return result
 
-    monkeypatch.setattr(notify.requests, "post", fake_post)
+    monkeypatch.setattr(notify.urllib.request, "urlopen", fake_urlopen)
     return calls
 
 
@@ -88,15 +119,20 @@ def test_failure_post_uses_correct_endpoint_headers_and_body(monkeypatch):
     assert notify.main([]) == 0
     assert len(calls) == 1
 
-    url, kwargs = calls[0]
-    assert url == "https://api.onesignal.com/notifications"
-    assert kwargs["headers"] == {"Authorization": f"Key {API_KEY}"}
-    assert kwargs["timeout"] == notify.REQUEST_TIMEOUT
+    request, timeout = calls[0]
+    assert request.full_url == "https://api.onesignal.com/notifications"
+    assert request.get_method() == "POST"
+    assert request.get_header("Authorization") == f"Key {API_KEY}"
+    assert request.get_header("Content-type") == "application/json"
+    assert timeout == notify.REQUEST_TIMEOUT
 
-    payload = kwargs["json"]
+    payload = json.loads(request.data.decode("utf-8"))
     assert payload["app_id"] == APP_ID
     assert payload["target_channel"] == "push"
-    assert payload["included_segments"] == ["Subscribed Users"]
+    assert payload["filters"] == [
+        {"field": "session_count", "relation": ">", "value": "-1"}
+    ]
+    assert "included_segments" not in payload
     assert payload["headings"]["en"]
     assert "failed" in payload["contents"]["en"].lower()
     assert RUN_URL in payload["contents"]["en"]
@@ -108,9 +144,32 @@ def test_run_url_is_omitted_when_context_incomplete(monkeypatch):
     calls = capture_posts(monkeypatch, [FakeResponse(200)])
 
     assert notify.main([]) == 0
-    payload = calls[0][1]["json"]
+    payload = json.loads(calls[0][0].data.decode("utf-8"))
     assert "data" not in payload
     assert "https://github.com" not in payload["contents"]["en"]
+
+
+FILTERS = [{"field": "session_count", "relation": ">", "value": "-1"}]
+
+
+def test_build_payload_targets_all_devices_with_filters():
+    env = {
+        "GITHUB_SERVER_URL": "https://github.com",
+        "GITHUB_REPOSITORY": "owner/repo",
+        "GITHUB_RUN_ID": "42",
+        "GITHUB_WORKFLOW": "Bollywood Reels",
+    }
+    failure = notify.build_payload(APP_ID, env=env)
+    assert failure["target_channel"] == "push"
+    assert failure["filters"] == FILTERS
+    assert "included_segments" not in failure
+    assert failure["data"] == {"run_url": RUN_URL}
+
+    test = notify.build_payload(APP_ID, test_mode=True, env=env)
+    assert test["target_channel"] == "push"
+    assert test["filters"] == FILTERS
+    assert "included_segments" not in test
+    assert "data" not in test
 
 
 # --------------------------------------------------------------------------
@@ -158,7 +217,7 @@ def test_retries_once_on_network_error(monkeypatch):
     set_creds(monkeypatch)
     calls = capture_posts(
         monkeypatch,
-        [requests.ConnectionError("connection refused"), FakeResponse(200)],
+        [urllib.error.URLError("connection refused"), FakeResponse(200)],
     )
 
     assert notify.main([]) == 0
@@ -173,6 +232,19 @@ def test_4xx_is_not_retried(monkeypatch):
     assert len(calls) == 1
 
 
+def test_http_200_with_empty_body_is_accepted(monkeypatch):
+    """OneSignal returns 200 with no id when there are no subscribers."""
+    set_creds(monkeypatch)
+    calls = capture_posts(
+        monkeypatch, [FakeResponse(200, body=b'{"id": ""}')]
+    )
+
+    assert notify.send_notification(
+        notify.build_payload(APP_ID), API_KEY
+    ) is True
+    assert len(calls) == 1
+
+
 # --------------------------------------------------------------------------
 # --test mode
 # --------------------------------------------------------------------------
@@ -182,7 +254,7 @@ def test_test_mode_payload_is_labelled_and_has_no_run_url(monkeypatch):
     calls = capture_posts(monkeypatch, [FakeResponse(200)])
 
     assert notify.main(["--test"]) == 0
-    payload = calls[0][1]["json"]
+    payload = json.loads(calls[0][0].data.decode("utf-8"))
     assert "TEST" in payload["headings"]["en"]
     assert "test" in payload["contents"]["en"].lower()
     assert "data" not in payload
@@ -198,7 +270,7 @@ def test_secrets_never_appear_in_output(monkeypatch, capsys):
     # Even an exception message that embeds the credentials must not leak.
     calls = capture_posts(
         monkeypatch,
-        [requests.ConnectionError(f"boom {API_KEY} {APP_ID}"), FakeResponse(200)],
+        [urllib.error.URLError(f"boom {API_KEY} {APP_ID}"), FakeResponse(200)],
     )
 
     assert notify.main([]) == 0
@@ -211,14 +283,58 @@ def test_secrets_never_appear_in_output(monkeypatch, capsys):
 
 def test_unexpected_error_still_exits_zero(monkeypatch, capsys):
     set_creds(monkeypatch)
+    calls = capture_posts(
+        monkeypatch, [RuntimeError(f"unexpected {API_KEY}")]
+    )
 
-    def exploding_post(url, **kwargs):
-        raise RuntimeError(f"unexpected {API_KEY}")
-
-    monkeypatch.setattr(notify.requests, "post", exploding_post)
     assert notify.main([]) == 0
+    assert len(calls) == 1
     captured = capsys.readouterr()
     assert API_KEY not in captured.out + captured.err
+
+
+# --------------------------------------------------------------------------
+# No third-party packages (regression for workflow run 45058391453)
+# --------------------------------------------------------------------------
+def test_imports_and_runs_without_requests_installed():
+    """The failure step must work when pip install failed and requests is absent.
+
+    A sitecustomize hook makes any ``import requests`` raise ImportError in a
+    fresh subprocess. The notifier still has to import, run and exit 0.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        blocker = Path(tmp) / "sitecustomize.py"
+        blocker.write_text(
+            "import sys\n"
+            "class _BlockThirdParty:\n"
+            "    def find_spec(self, fullname, path=None, target=None):\n"
+            "        if fullname.split('.')[0] == 'requests':\n"
+            "            raise ImportError(\n"
+            "                'third-party import blocked: ' + fullname\n"
+            "            )\n"
+            "        return None\n"
+            "sys.meta_path.insert(0, _BlockThirdParty())\n",
+            encoding="utf-8",
+        )
+
+        env = os.environ.copy()
+        for key in ENV_KEYS:
+            env.pop(key, None)
+        env["PYTHONPATH"] = tmp + os.pathsep + str(ROOT)
+
+        result = subprocess.run(
+            [sys.executable, str(ROOT / "notify_failure.py"), "--test"],
+            cwd=str(ROOT),
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+
+    assert result.returncode == 0, result.stderr
+    assert "ModuleNotFoundError" not in result.stderr
+    assert "ImportError" not in result.stderr
+    assert API_KEY not in result.stdout + result.stderr
 
 
 # --------------------------------------------------------------------------

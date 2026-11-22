@@ -36,24 +36,24 @@
 | 1 | Repo is code-only: no article bodies, images, audio, MP4s or secrets tracked; `git ls-files` contains only source/config/tests/docs/fonts/workflow | **PASS** — verified via `git ls-files` (29 currently tracked files), no media/secret values found |
 | 2 | `.gitignore` blocks `work/`, `out/`, `state/`, `node_modules/`, `.hyperframes/`, `__pycache__/`, `*.pyc`, `.env`, `*.log`, `pilot_*.txt`, `*.mp4`, `*.png`, `*.wav`, `*.mp3`, but not `assets/fonts/*.woff2` | **PASS** — both tracked OFL fonts remain in `git ls-files` |
 | 3 | Workflow uses `contents: read`, writes no git state, injects secrets only via env, never in argv/logs | **PASS** — YAML verified; Netlify creds read from environment |
-| 4 | Netlify app stays active without manual login (keep-alive) and failures are alerted (OneSignal) | **PARTIAL** — keep-alive and OneSignal steps are present; both secrets configured and the live API accepts test pushes (HTTP 200). Device delivery still requires a push platform + subscriber in OneSignal (blocker below) |
+| 4 | Netlify app stays active without manual login (keep-alive) and failures are alerted (OneSignal) | **PASS** — keep-alive present; Web Push configured and a device subscribed; two live test pushes delivered (`successful: 1, failed: 0`); notifier is stdlib-only so it survives a failed `pip install` |
 | 5 | Attribution + takedown + security reporting documented for a public repo | **PASS** — `CONTENT_POLICY.md` and `SECURITY.md` added; README links them |
 | 6 | No live token strings in any tracked file; only dummy placeholders in tests | **PASS** — scan found only test fixtures (e.g. `"token"`, `"secret"`), no real credential patterns |
 
-### Blocker: OneSignal app has no push platform or subscribers
+### Resolved: OneSignal web push
 
-Both secrets are configured and `notify_failure.py --test` is accepted by the
-live API (HTTP 200). However the OneSignal app "WL App" reports
-`ios/android/web = false` and zero messageable players, so the API responds
-`{"id":"","errors":["All included players are not subscribed"]}` — no device
-can receive an alert yet. Enabling Web Push requires either a OneSignal
-**Organization API key** (app-config endpoints reject the App API key with 401)
-or a one-time manual setup in the OneSignal dashboard, followed by a device
-subscription. The workflow itself is complete and fails safe.
+Web Push was configured in the OneSignal dashboard for
+`https://bollywood-reel-generator.netlify.app`, the required root
+`OneSignalSDKWorker.js` was deployed with the subscribe page, and a device is
+subscribed (1 messageable player). Live `notify_failure.py --test` runs produced
+message ids with `successful: 1, failed: 0`. Targeting uses a `session_count`
+filter because the named "Subscribed Users" segment returned no recipients on
+this app. The notifier uses only the standard library so it works even when the
+workflow's `pip install` step fails.
 
 ## Remaining issues / manual steps
 
-1. **Remaining setup**: add the publishing secrets listed in `README.md` — Vercel Blob video token/store ID, YouTube OAuth client/secret/refresh token and Instagram token. Netlify and OneSignal secrets are already configured. For OneSignal delivery, enable a push platform in the dashboard (or supply an Organization API key) and subscribe at least one device; then alerts will reach it.
+1. **Remaining setup**: add the publishing secrets listed in `README.md` — Vercel Blob video token/store ID, YouTube OAuth client/secret/refresh token and Instagram token. Netlify and OneSignal are fully configured and verified.
 2. **`latin_in_hindi`** is a non-critical warning on 3/30 pilot scripts — Google Translate leaves brand names such as *JioHotstar* in Latin script. Intentional and harmless.
 3. **YouTube uploads default to private** (`publish.verification_required: true`) until reviewed manually.
 4. GitHub Actions cron can be delayed under load; the generator always reads the latest RSS feed.

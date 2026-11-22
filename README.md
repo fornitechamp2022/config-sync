@@ -55,10 +55,11 @@ git state. Two housekeeping behaviours keep the public setup dependable:
   site so the app is never paused for inactivity (no manual login required). It
   needs no credential at all and uses no build minutes.
 - **OneSignal failure notifications:** a workflow step sends a push alert on
-  failed runs so issues are noticed without watching CI. Both secrets are
-  configured and the API call is verified (HTTP 200). Delivery to a device
-  additionally requires the OneSignal app to have a push platform enabled and
-  at least one subscribed recipient — see `QUALITY_REPORT.md`.
+  failed runs so issues are noticed without watching CI. Web Push is configured
+  on `https://bollywood-reel-generator.netlify.app`, a device is subscribed,
+  and live test pushes were delivered (`successful: 1, failed: 0`). The notifier
+  uses only the Python standard library so it still works when `pip install`
+  fails.
 
 ## Layout
 

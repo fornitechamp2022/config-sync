@@ -32,11 +32,10 @@ jobs:
       - name: Install Python dependencies
         run: pip install -r requirements.txt
 
-      - name: Install pinned HyperFrames CLI
-        run: npm install --no-save hyperframes@0.9.77
-
-      - name: Install pinned Netlify CLI
-        run: npm install --no-save netlify-cli@24 --silent
+      - name: Install pinned CLIs together
+        # A second `npm install --no-save` prunes the first package, so install
+        # both in one command or the HyperFrames binary disappears.
+        run: npm install --no-save hyperframes@0.9.77 netlify-cli@24 --silent
 
       - name: Point generator at pinned CLI
         run: |

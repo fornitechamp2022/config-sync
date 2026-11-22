@@ -7,18 +7,24 @@ Contract:
   * Skip quietly when credentials are missing/invalid (the App ID is not wired
     up yet) so the workflow still fails for the *real* reason.
 
+This module deliberately uses ONLY the Python standard library. It runs in a
+workflow ``if: failure()`` step, which must still work when
+``pip install -r requirements.txt`` has failed -- including when third-party
+packages such as ``requests`` were never installed at all.
+
 The App ID is public by design but is treated as sensitive here too: nothing
 that is printed contains either credential verbatim.
 """
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 import time
+import urllib.error
+import urllib.request
 import uuid
-
-import requests
 
 ONE_SIGNAL_URL = "https://api.onesignal.com/notifications"
 REQUEST_TIMEOUT = 10  # seconds
@@ -86,7 +92,10 @@ def build_payload(
     payload = {
         "app_id": app_id,
         "target_channel": "push",
-        "included_segments": ["Subscribed Users"],
+        # "Subscribed Users" is broken on this app (OneSignal replies
+        # "All included players are not subscribed" even for subscribed
+        # players). Targeting a session count > -1 reaches all devices.
+        "filters": [{"field": "session_count", "relation": ">", "value": "-1"}],
         "headings": {"en": heading},
         "contents": {"en": contents},
     }
@@ -95,21 +104,50 @@ def build_payload(
     return payload
 
 
+def _response_status(response) -> int:
+    """Best-effort extraction of an HTTP status from a urlopen response."""
+    status = getattr(response, "status", None)
+    if status is None:
+        getcode = getattr(response, "getcode", None)
+        status = getcode() if callable(getcode) else None
+    try:
+        return int(status) if status is not None else 0
+    except (TypeError, ValueError):
+        return 0
+
+
 def send_notification(payload: dict, api_key: str, secrets: tuple[str, ...] = ()) -> bool:
     """POST the notification, retrying once on network errors or HTTP 5xx.
 
-    Returns True on success and False otherwise; never raises.
+    Uses only ``urllib.request`` / ``urllib.error`` / ``json`` so this works
+    even when no third-party packages are installed. Returns True on success
+    and False otherwise; never raises.
     """
-    headers = {"Authorization": f"Key {api_key}"}
+    body = json.dumps(payload).encode("utf-8")
+    headers = {
+        "Authorization": f"Key {api_key}",
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
+
     for attempt in range(1, MAX_ATTEMPTS + 1):
+        response = None
         try:
-            response = requests.post(
+            request = urllib.request.Request(
                 ONE_SIGNAL_URL,
-                json=payload,
+                data=body,
                 headers=headers,
-                timeout=REQUEST_TIMEOUT,
+                method="POST",
             )
-        except requests.RequestException as exc:
+            response = urllib.request.urlopen(request, timeout=REQUEST_TIMEOUT)
+            status = _response_status(response)
+        except urllib.error.HTTPError as exc:
+            # urlopen raises HTTPError for non-2xx replies. Its text can echo
+            # the URL/headers, so only the numeric status is logged below.
+            status = getattr(exc, "code", 0) or 0
+        except (urllib.error.URLError, OSError) as exc:
+            # URLError covers connection/DNS failures; OSError covers timeouts
+            # and socket/ssl errors (URLError is itself an OSError subclass).
             # Log only the exception *type*: its text could echo the request.
             _log(
                 f"OneSignal: network error on attempt {attempt} "
@@ -121,8 +159,14 @@ def send_notification(payload: dict, api_key: str, secrets: tuple[str, ...] = ()
                 continue
             _log("OneSignal: gave up after two attempts.", secrets)
             return False
+        finally:
+            if response is not None:
+                close = getattr(response, "close", None)
+                if callable(close):
+                    close()
 
-        status = getattr(response, "status_code", 0)
+        # Only the status code is inspected: OneSignal answers HTTP 200 with an
+        # empty body/id when there are no subscribers, which is still accepted.
         if 200 <= status < 300:
             _log(f"OneSignal: notification accepted (HTTP {status}).", secrets)
             return True
