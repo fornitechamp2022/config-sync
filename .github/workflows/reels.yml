@@ -29,6 +29,11 @@ jobs:
         with:
           node-version: "20"
 
+      - name: Install ffmpeg / ffprobe
+        # ubuntu-latest does not ship ffprobe; the generator needs it for
+        # audio durations, BGM looping and the final MP4 size cap.
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
+
       - name: Install Python dependencies
         run: pip install -r requirements.txt
 
