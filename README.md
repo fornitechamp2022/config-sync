@@ -41,16 +41,20 @@ HyperFrames project (pinned CLI 0.9.77) → check → render → ffmpeg size cap
 Netlify Blob store `reels-media` (7-day rolling retention)
         ↓  public URL  https://bollywood-reel-generator.netlify.app/r/reels/<ascii-id>.mp4
         ↓  serverless Function streams with HTTP Range support (206 / Accept-Ranges)
-        ↓  → YouTube Shorts   (OAuth refresh token + resumable upload)  [optional]
-        ↓  → Instagram Reels  (Graph API: container → poll → publish)   [optional]
-append-only private Netlify Blob state records (store `reel-state`)
+        ↓  → Buffer API (official; long-lived personal key, ≤2 posts/day, ≥3h apart)
+        ↓      → YouTube Shorts + Instagram Reels via connected channels  [optional]
+        ↓  → direct YT/IG providers remain available as a fallback        [optional]
+append-only private Netlify Blob state records (store `reel-state`, 30-day prune)
 ```
 
-Every publishing step is optional: it runs only when its credentials are present
-in the environment, and successful platform IDs are written into the manifest
-ledger so a rerun never double-posts. **Netlify is the default and active host
-for both state and public media. Vercel is an optional fallback, not the primary
-platform.** There is no LLM anywhere in the loop.
+Publishing is **Buffer-first**: the finished reel is posted through Buffer's
+official API with a long-lived personal API key, so there is no monthly login and
+no Meta/Google app verification. Every publishing step is optional: it runs only
+when its credentials are present in the environment, and successful platform IDs
+are written into the manifest ledger so a rerun never double-posts. **Netlify is
+the host for state blobs and public media only — no Netlify deploy is performed.**
+Vercel is an optional fallback, not the primary platform. There is no LLM anywhere
+in the loop.
 
 ## Public MP4 hosting (Netlify-first)
 
@@ -83,17 +87,33 @@ This lets social platforms seek and verify the file.
 
 ## Scheduled runs, keep-alive and failure alerts
 
-The 6-hourly GitHub Actions workflow needs only `contents: read` and writes no
-git state. It runs on **Node 22**, installs `ffmpeg`/`ffprobe` via apt, installs
-the pinned CLIs (`hyperframes@0.9.77`, `netlify-cli@24`) in a **single**
-`npm install` so one package cannot prune the other, and retains CI artifacts
-for **2 days**. Two housekeeping behaviours keep the public setup dependable:
+The 6-hourly GitHub Actions workflow (cron **plus manual `workflow_dispatch`**)
+needs only the built-in `GITHUB_TOKEN` with `contents: read` and writes no git
+state. **No GitHub PAT and no Netlify PAT are used by the automation:** a GitHub
+PAT was only needed once to create/push the repository, and the Netlify token is
+a long-lived, user-supplied token used only for Netlify Blob state/media reads
+and writes (`reel-state`, `reels-media`). There is **no Netlify deploy step** — the
+video Function and static site are already deployed. It runs on **Node 22**,
+installs `ffmpeg`/`ffprobe` via apt, installs the pinned CLIs
+(`hyperframes@0.9.77`, `netlify-cli@24`) in a **single** `npm install` so one
+package cannot prune the other, and retains CI artifacts for **2 days**.
+
+**Accepted cadence and SLA.** The code enforces at most **2 posts per day** and
+at least **3 hours** of spacing between posts, with varied stories and official
+APIs only — no mass posting, bots or session cookies. This is a conservative
+anti-spam posture, not a guarantee: no service can promise that a platform will
+never limit reach. A run completing within **a few minutes** of its scheduled
+time is acceptable; GitHub Actions cron can be delayed under load, and delayed
+runs still read the latest feed. Two housekeeping behaviours keep the public
+setup dependable:
 
 - **Netlify keep-alive:** a workflow step makes a plain HTTPS GET to the Netlify
   site so the app is never paused for inactivity (no manual login required). It
   needs no credential at all and uses no build minutes.
-- **OneSignal failure notifications:** a workflow step sends a push alert on
-  failed runs so issues are noticed without watching CI. Web Push is configured
+- **OneSignal failure notifications (failure-only):** a workflow step guarded by
+  `if: failure()` sends a push alert on failed runs so issues are noticed without
+  watching CI — **there are no success notifications**. The OneSignal REST key is
+  long-lived. Web Push is configured
   on `https://bollywood-reel-generator.netlify.app`, a device is subscribed, and
   live test pushes were delivered (`successful: 1, failed: 0`). Targeting uses a
   `session_count` filter (the named "Subscribed Users" segment returned no
@@ -117,13 +137,13 @@ for **2 days**. Two housekeeping behaviours keep the public setup dependable:
 | `pipeline/images.py` | image download, perceptual-hash dedupe and collage baking |
 | `pipeline/project.py` | HyperFrames project writer (motion, news-channel UI, captions, audio) |
 | `pipeline/state.py` | append-only state (Netlify Blobs or Vercel Blob, local JSON fallback) |
-| `pipeline/publish.py` | Netlify public MP4 upload + Function URL, YouTube Shorts, Instagram Reels |
+| `pipeline/publish.py` | Buffer-first posting (official API, daily cap + spacing), Netlify public MP4 upload + Function URL, optional direct YouTube Shorts / Instagram Reels |
 | `netlify.toml` | `/r/*` redirect to the video Function; publish root `public/` |
 | `netlify/functions/video.mjs` | serverless MP4 streamer with Range support |
 | `public/` | Netlify static root: subscribe page + OneSignal service worker |
 | `notify_failure.py` | stdlib-only OneSignal failure notifier |
 | `assets/fonts/` | bundled Noto Sans Devanagari (OFL) |
-| `.github/workflows/reels.yml` | 6-hourly run (cron + manual dispatch), keep-alive, 2-day artifacts, OneSignal alerts |
+| `.github/workflows/reels.yml` | 6-hourly run (cron + manual dispatch), Buffer secrets, keep-alive, 2-day artifacts, failure-only OneSignal alerts, no deploy step |
 | `tests/` | offline unit tests for state, publishing, video Function, QA, motion and the workflow YAML |
 | `QUALITY_REPORT.md` | acceptance criteria, iteration record and remaining issues |
 
@@ -134,7 +154,7 @@ pip install -r requirements.txt
 python generate.py --check                               # discovery + gate + story preview
 python pilot.py                                          # 14-day sentence-first script audit
 python generate.py --run --count 1 --no-publish --local-state
-python -m pytest tests -q                                # 199 passed, all offline (no network)
+python -m pytest tests -q                                # 219 passed, all offline (no network)
 python -m compileall pipeline generate.py pilot.py
 ```
 
@@ -170,6 +190,8 @@ Blobs** (`publish.state_backend: netlify`):
 
 - State store: `reel-state` (override with `publish.netlify_state_store`).
 - Keys: `state/runs/<timestamp>-<uuid>.json`; new runs append, never overwrite.
+- Records older than **30 days** are pruned after each write (the just-written
+  run is always protected).
 - Access is via the locally installed Netlify CLI (`netlify-cli@24` in CI, or
   `npx --no-install netlify`), using `netlify blobs:list`, `blobs:get` and
   `blobs:set`. The CLI reads `NETLIFY_AUTH_TOKEN` and `NETLIFY_SITE_ID` from the
@@ -183,6 +205,30 @@ Public MP4 hosting uses the separate **Netlify Blob** store `reels-media` and
 the `/r/<ascii-key>` Function described above. Vercel Blob (`BLOB_VIDEO_TOKEN`
 / `BLOB_VIDEO_STORE_ID`) is an optional fallback only.
 
+### Buffer publishing (primary)
+
+Buffer is the default publishing provider. It is called through **Buffer's
+official API** with a **long-lived personal API key** — there is **no monthly
+login** and **no Meta/Google app verification**. Three encrypted Actions secrets
+are injected into the *Generate reel* step:
+
+| Secret | Purpose |
+|---|---|
+| `BUFFER_API_KEY` | long-lived personal Buffer API key |
+| `BUFFER_YT_CHANNEL_ID` | Buffer channel id for the connected YouTube account |
+| `BUFFER_IG_CHANNEL_ID` | Buffer channel id for the connected Instagram account |
+
+Posts are deliberately paced: `config.yaml` sets `publish.max_posts_per_day: 2`
+(hard cap across all platforms, counted over a rolling 24 hours) and
+`publish.min_hours_between_posts: 3`, and stories are varied. Only the official
+Buffer GraphQL API is used — no mass posting, bots or session cookies. These
+limits reduce risk but cannot guarantee a platform will never limit reach.
+Direct YouTube/Instagram publishing remains available as a fallback by switching
+`publish.provider` to `direct` and enabling those flags; with Buffer active they
+are disabled so a reel is never posted twice. Absent credentials are skipped
+cleanly. Buffer's own retention governs how long a queued post is held — see
+[CONTENT_POLICY.md](CONTENT_POLICY.md).
+
 ## GitHub Actions secrets
 
 All values are encrypted Actions secrets (plus the two Netlify **site**
@@ -192,44 +238,48 @@ outside the repository; it is never in git.
 
 | Secret / variable | Needed for | Status |
 |---|---|---|
-| `NETLIFY_AUTH_TOKEN`, `NETLIFY_SITE_ID` | Netlify Blob state (`reel-state`) **and** public MP4 uploads (`reels-media`) via the Actions step | configured — **rotate** |
-| `NETLIFY_AUTH_TOKEN`, `NETLIFY_SITE_ID` (set on the **Netlify site**, not in Actions) | read `reels-media` from `netlify/functions/video.mjs` for public `/r/` playback | configure/verify on the site |
-| `GH_PAT` (GitHub PAT) | optional external automation/backups; the scheduled workflow itself uses only `contents: read` and the built-in `GITHUB_TOKEN` | configured — **rotate** |
-| `ONESIGNAL_APP_ID` | OneSignal failure notifications (public app identifier) | configured and verified |
-| `ONESIGNAL_REST_API_KEY` | OneSignal failure notifications (REST key used by the alert step) | configured and verified — **rotate** |
+| `BUFFER_API_KEY`, `BUFFER_YT_CHANNEL_ID`, `BUFFER_IG_CHANNEL_ID` | Buffer-first posting via the official API (long-lived personal key; no monthly login or app verification) | configure — primary publisher |
+| `NETLIFY_AUTH_TOKEN`, `NETLIFY_SITE_ID` | Netlify Blob state/media blobs (`reel-state`, `reels-media`) **only — never a deploy**; the token must be long-lived and user-supplied | configured — rotate if exposed |
+| `NETLIFY_AUTH_TOKEN`, `NETLIFY_SITE_ID` (set on the **Netlify site**, not in Actions) | Function reads `reels-media` from `netlify/functions/video.mjs` for public `/r/` playback | configure/verify on the site |
+| `GH_PAT` (GitHub PAT) | **not used by the automation** — only for initial repo creation/push; CI uses the built-in `GITHUB_TOKEN` with `contents: read` | not needed after setup |
+| `ONESIGNAL_APP_ID`, `ONESIGNAL_REST_API_KEY` | failure-only push alerts (`if: failure()`); the REST key is long-lived | configured and verified |
 | `BLOB_VIDEO_TOKEN`, `BLOB_VIDEO_STORE_ID` | optional Vercel Blob public MP4 fallback | add manually if wanted |
 | `BLOB_STATE_TOKEN`, `BLOB_STATE_STORE_ID` | optional legacy Vercel Blob state backend | add manually if wanted |
-| `YT_CLIENT_ID`, `YT_CLIENT_SECRET`, `YT_REFRESH_TOKEN` | YouTube Shorts | add manually if wanted |
-| `IG_LONG_LIVED_TOKEN`, `IG_USER_ID` | Instagram Reels | add manually if wanted |
+| `YT_CLIENT_ID`, `YT_CLIENT_SECRET`, `YT_REFRESH_TOKEN` | optional direct YouTube Shorts fallback | add manually if wanted |
+| `IG_LONG_LIVED_TOKEN`, `IG_USER_ID` | optional direct Instagram Reels fallback | add manually if wanted |
 
-> **Rotate the GitHub PAT, Netlify PAT and OneSignal REST key:** they were
-> shared in chat and must be treated as exposed. Generate new values, replace
-> the encrypted secrets (and the Netlify site variable), then revoke the old
-> ones. See [SECURITY.md](SECURITY.md). Publishing secrets that are absent are
-> skipped cleanly — the workflow still produces MP4 artifacts.
+> **Long-lived credentials, no monthly attention.** Buffer, OneSignal and the
+> Netlify state token are long-lived, and the GitHub PAT is not used by the
+> automation at all after setup. No monthly login or renewal is required; the
+> only attention needed is if a credential is revoked/expires or a platform
+> changes its policy. Rotate any credential immediately if it is suspected
+> exposed — see [SECURITY.md](SECURITY.md). Publishing secrets that are absent
+> are skipped cleanly — the workflow still produces MP4 artifacts.
 
 No secret is committed to the repo; all are injected as step environment
 variables. The workflow needs only `contents: read`, never puts tokens in argv
-or logs, and writes no git state. YouTube uploads default to **private** when
-`publish.verification_required` is true — flip it to `public` after review.
-Instagram needs a Professional account linked to a Facebook Page.
+or logs, writes no git state, and has **no deploy step**. Direct YouTube uploads
+default to **private** when `publish.verification_required` is true — flip it to
+`public` after review. Instagram needs a Professional account linked to a
+Facebook Page.
 
 ## Verification status
 
-- **Current commit `c5204b4`** ("iter6/7: motion craft, source diversity,
-  Netlify serverless video hosting") is under CI verification.
-- **Last green commit `dcf0135`** is tagged **`verified-working`** and is the
-  rollback point if verification fails.
-- Offline suite: **199 passing tests**.
+- **Current work:** Buffer publishing provider + daily posting cap and this
+  documentation update are under verification.
+- **Last documented green baseline:** `dcf0135` is tagged **`verified-working`**
+  and remains the rollback point if verification fails.
+- Offline suite: **219 passing tests**.
 
 ```bash
-python -m pytest tests -q          # 199 passed
+python -m pytest tests -q          # 219 passed
 python -m compileall pipeline generate.py pilot.py
 python pilot.py                    # 14-day script audit
 python generate.py --check         # QA gate preview
+python -c "import yaml; yaml.safe_load(open('.github/workflows/reels.yml', encoding='utf-8')); print('YAML OK')"
 git status --short                 # working tree status
 git diff --stat                    # change summary
-git grep -nE 'ghp_[A-Za-z0-9]|nfp_[A-Za-z0-9]|os_v2_[A-Za-z0-9]|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' -- '*.md'  # must print nothing
+git grep -nE 'ghp_[A-Za-z0-9]|nfp_[A-Za-z0-9]|os_v2_[A-Za-z0-9]|buf_[A-Za-z0-9]|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' -- '*.md'  # must print nothing
 ```
 
 ## Language behaviour
@@ -248,6 +298,7 @@ Headlines, article text and images belong to their publishers. The generator
 uses them transiently for transformational news-commentary reels, keeps only
 hashes/URLs/IDs in state, and records the source URL in the manifest and the
 platform description. No scraped media is committed. Public MP4s expire after
-7 days and CI artifacts after 2 days. See [CONTENT_POLICY.md](CONTENT_POLICY.md)
+7 days, CI artifacts after 2 days, and state records after 30 days. See
+[CONTENT_POLICY.md](CONTENT_POLICY.md)
 for attribution, retention and the takedown/contact process. Review usage rights
 before publishing commercially.

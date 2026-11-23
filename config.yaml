@@ -105,6 +105,14 @@ publish:
   netlify_state_store: "reel-state"  # Netlify Blobs store for run records
   video_store: "reels-media"  # Vercel Blob store: public MP4 hosting
   state_store: "reels-state"  # Vercel Blob store: legacy state backend
-  youtube: true
-  instagram: true
+  # "buffer" posts via Buffer's GraphQL API with a long-lived personal key
+  # (env BUFFER_API_KEY + BUFFER_YT_CHANNEL_ID / BUFFER_IG_CHANNEL_ID).
+  # "direct" keeps the legacy per-run YouTube/Instagram uploads below.
+  provider: "buffer"          # buffer | direct
+  max_posts_per_day: 2        # hard daily cap across all platforms
+  min_hours_between_posts: 3  # minimum spacing between any two published posts
+  # Direct posting stays disabled while Buffer is active so a reel is never
+  # posted twice. Only relevant when provider == "direct".
+  youtube: false
+  instagram: false
   verification_required: true

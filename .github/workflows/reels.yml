@@ -1,7 +1,9 @@
 name: Bollywood Reels
 
 # Every six hours, plus manual runs. The generator appends to its own ledger,
-# so no git writes (and no write token) are required.
+# so no git writes (and no write token) are required. CI uses only the built-in
+# GITHUB_TOKEN with contents:read — no GitHub PAT and no Netlify PAT/login, and
+# no Netlify deploy step. All publishing goes through the official Buffer API.
 on:
   schedule:
     - cron: "0 */6 * * *"
@@ -63,6 +65,11 @@ jobs:
           YT_REFRESH_TOKEN: ${{ secrets.YT_REFRESH_TOKEN }}
           IG_LONG_LIVED_TOKEN: ${{ secrets.IG_LONG_LIVED_TOKEN }}
           IG_USER_ID: ${{ secrets.IG_USER_ID }}
+          # Buffer is the primary publishing provider: official API, long-lived
+          # personal key, no monthly login and no Meta/Google app verification.
+          BUFFER_API_KEY: ${{ secrets.BUFFER_API_KEY }}
+          BUFFER_YT_CHANNEL_ID: ${{ secrets.BUFFER_YT_CHANNEL_ID }}
+          BUFFER_IG_CHANNEL_ID: ${{ secrets.BUFFER_IG_CHANNEL_ID }}
 
       - name: Keep Netlify site warm
         # Netlify's free plan can pause projects with no traffic. A plain HTTPS

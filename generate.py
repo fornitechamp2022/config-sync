@@ -16,7 +16,7 @@ import shutil
 import sys
 import time
 from collections import Counter
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 if hasattr(sys.stdout, "reconfigure"):
@@ -328,6 +328,41 @@ def report_check(selection: list[dict]) -> None:
     print(f"QA summary: {clean} pass / {len(selection) - clean} reject")
 
 
+def publishing_gate(state_data: dict, cfg: dict) -> tuple[bool, str | None, int]:
+    """Decide whether this reel may be posted, using the audit ledger.
+
+    Enforces both ``max_posts_per_day`` and ``min_hours_between_posts``. Returns
+    ``(allowed, reason, posts_in_last_24h)``; a denied reason is either
+    ``"daily_cap"`` or ``"min_hours"``. Bad config values fall back to the
+    documented defaults so a typo can never disable the guard.
+    """
+    from pipeline.publish import last_post_at, posts_in_last_24h
+
+    pcfg = cfg.get("publish") or {}
+    try:
+        max_day = int(pcfg.get("max_posts_per_day", 2))
+    except (TypeError, ValueError):
+        max_day = 2
+    try:
+        min_hours = float(pcfg.get("min_hours_between_posts", 3))
+    except (TypeError, ValueError):
+        min_hours = 3.0
+
+    count = posts_in_last_24h(state_data)
+    # A cap of 0 blocks all posting; a negative value disables the cap.
+    if max_day >= 0 and count >= max_day:
+        return False, "daily_cap", count
+
+    last = last_post_at(state_data)
+    if last is not None and min_hours > 0:
+        now = datetime.now(timezone.utc)
+        # A future timestamp (clock skew) must count as a recent post, never as
+        # permission to publish again immediately.
+        if last > now or (now - last) < timedelta(hours=min_hours):
+            return False, "min_hours", count
+    return True, None, count
+
+
 def make_manifest(story: dict, article: dict, cfg: dict) -> dict:
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     return {
@@ -468,21 +503,39 @@ def main() -> int:
         else:
             video_path = None
 
+        skipped_reason = None
         if not args.no_publish and video_path:
             from pipeline.publish import publish_all, upload_video
+            # Cap/spacing checks happen before any social call. The video is
+            # still rendered and uploaded to the public host either way; only
+            # the platform posts are skipped, and the job never fails.
+            allowed, skipped_reason, recent = publishing_gate(state.data, cfg)
+            if not allowed:
+                print(f"[publish] rate limit ({skipped_reason}): "
+                      f"{recent} reel(s) published in the last 24h; "
+                      "skipping social post")
+                manifest["publish_skipped"] = {
+                    "reason": skipped_reason,
+                    "posts_in_last_24h": recent,
+                }
             blob = upload_video(video_path, cfg, manifest)
             if blob:
                 manifest["video_url"] = blob["url"]
-                published = publish_all(video_path, blob["url"], manifest, cfg)
-                manifest["published"] = published
+                if allowed:
+                    published = publish_all(video_path, blob["url"], manifest, cfg)
+                    manifest["published"] = published
             else:
                 print("[publish] no video URL; platform uploads skipped")
 
+        manifest["outcome"] = (
+            "skipped_rate_limit" if skipped_reason
+            else ("rendered" if video_path else "prepared")
+        )
         (out_root / f"{manifest['id']}.manifest.json").write_text(
             json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
 
         state.record_run({
-            "outcome": "rendered" if video_path else "prepared",
+            "outcome": manifest["outcome"],
             "articles": {article["url_key"]: {
                 "title": story["headline"],
                 "title_key": article.get("title_key", ""),

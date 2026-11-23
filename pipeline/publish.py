@@ -23,6 +23,16 @@ YOUTUBE_UPLOAD_URL = "https://www.googleapis.com/upload/youtube/v3/videos"
 PUBLIC_PREFIX = "reels/"
 MEDIA_TTL_DAYS = 7
 
+# Buffer's official GraphQL API. A long-lived personal key lives only in the
+# environment; it is never written to config, state or logs.
+BUFFER_API_URL = "https://api.buffer.com"
+BUFFER_CHANNEL_ENV = {
+    "youtube": "BUFFER_YT_CHANNEL_ID",
+    "instagram": "BUFFER_IG_CHANNEL_ID",
+}
+BUFFER_MAX_RETRIES = 2      # retries after the first 429 response
+BUFFER_RETRY_CAP_SECONDS = 60
+
 
 # ---------- shared helpers ----------
 def _vercel_options(token: str, store: str):
@@ -199,14 +209,105 @@ def _verify_public_url(url: str) -> bool:
 
 
 def _already_published(manifest: dict, platform: str) -> bool:
-    """Ledger guard: a platform id already recorded means do not post again."""
+    """Ledger guard: a platform id already recorded means do not post again.
+
+    ``post_id`` is Buffer's ledger id; the others belong to the direct uploaders.
+    """
     published = manifest.get("published") or {}
     if not isinstance(published, dict):
         return False
     entry = published.get(platform)
     if isinstance(entry, dict):
-        return bool(entry.get("video_id") or entry.get("media_id") or entry.get("id"))
+        return bool(
+            entry.get("post_id") or entry.get("video_id")
+            or entry.get("media_id") or entry.get("id")
+        )
     return bool(entry)
+
+
+# ---------- rate-limit ledger helpers ----------
+def _parse_timestamp(value: Any) -> datetime | None:
+    """Parse a published ``posted_at`` value into an aware UTC datetime.
+
+    Tolerates ISO-8601 strings (with or without ``Z``), epoch numbers and real
+    datetimes. Unknown/unparseable values return None — an entry with no known
+    age must never be treated as a recent post (nor as a reason to skip one).
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, datetime):
+        parsed = value
+    elif isinstance(value, date):
+        parsed = datetime.combine(value, datetime.min.time())
+    elif isinstance(value, (int, float)):
+        try:
+            parsed = datetime.fromtimestamp(value, tz=timezone.utc)
+        except (ValueError, OSError, OverflowError):
+            return None
+    elif isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    else:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def _published_entries(state_data: Any):
+    """Yield ``(reel_id, platform, timestamp)`` for every recorded ledger entry."""
+    if isinstance(state_data, dict):
+        reels = state_data.get("reels") or []
+    elif isinstance(state_data, (list, tuple)):
+        reels = state_data
+    else:
+        reels = []
+    for reel in reels:
+        if not isinstance(reel, dict):
+            continue
+        published = reel.get("published") or {}
+        if not isinstance(published, dict):
+            continue
+        reel_id = reel.get("id")
+        for platform, entry in published.items():
+            if not isinstance(entry, dict):
+                continue
+            yield (
+                reel_id or id(reel),
+                platform,
+                _parse_timestamp(entry.get("posted_at")
+                                 or entry.get("at") or entry.get("created_at")),
+            )
+
+
+def posts_in_last_24h(state_data: Any) -> int:
+    """Count distinct reels published during the last 24 hours.
+
+    A reel counts once even when it was posted to several platforms; a platform
+    entry qualifies when its ``posted_at`` is inside the rolling window. This is
+    the daily cap input — one "post" here is one reel in the audit ledger.
+    """
+    now = datetime.now(timezone.utc)
+    cutoff = now - timedelta(hours=24)
+    recent: set[Any] = set()
+    for reel_id, _platform, stamp in _published_entries(state_data):
+        if stamp is not None and cutoff <= stamp <= now:
+            recent.add(reel_id)
+    return len(recent)
+
+
+def last_post_at(state_data: Any) -> datetime | None:
+    """Return the newest recorded publish timestamp, or None when there is none."""
+    stamps = [
+        stamp for _reel_id, _platform, stamp in _published_entries(state_data)
+        if stamp is not None
+    ]
+    return max(stamps) if stamps else None
 
 
 # ---------- Netlify Blob + Edge Function (public media host) ----------
@@ -514,17 +615,216 @@ def instagram_upload(video_url: str, manifest: dict, cfg: dict) -> dict | None:
         return None
 
 
+# ---------- Buffer (official GraphQL API, long-lived personal key) ----------
+def _buffer_api_key() -> str:
+    """Read the personal API key from the environment (never log its value)."""
+    return os.environ.get("BUFFER_API_KEY", "").strip()
+
+
+def _buffer_channel_id(platform: str) -> str:
+    env_name = BUFFER_CHANNEL_ENV.get(str(platform or "").strip().lower())
+    return os.environ.get(env_name, "").strip() if env_name else ""
+
+
+def buffer_creds_present() -> bool:
+    """True when a key and at least one destination channel are configured."""
+    return bool(_buffer_api_key() and (
+        _buffer_channel_id("youtube") or _buffer_channel_id("instagram")
+    ))
+
+
+def _retry_after_seconds(resp: Any) -> float:
+    """Read a 429 ``Retry-After`` header as a bounded, non-negative delay."""
+    headers = getattr(resp, "headers", None)
+    raw = headers.get("Retry-After") if headers else None
+    if raw is None:
+        return 1.0
+    try:
+        seconds = float(str(raw).strip())
+        if seconds < 0 or seconds != seconds or seconds == float("inf"):
+            return 1.0
+        return min(seconds, float(BUFFER_RETRY_CAP_SECONDS))
+    except (TypeError, ValueError):
+        try:
+            from email.utils import parsedate_to_datetime
+            when = parsedate_to_datetime(str(raw))
+            if when.tzinfo is None:
+                when = when.replace(tzinfo=timezone.utc)
+            delta = (when - datetime.now(timezone.utc)).total_seconds()
+            return min(max(delta, 0.0), float(BUFFER_RETRY_CAP_SECONDS))
+        except Exception:
+            return 1.0
+
+
+def buffer_request(query: str) -> dict | None:
+    """POST a GraphQL document to Buffer, returning its ``data`` object.
+
+    Returns None on missing credentials, transport/HTTP/GraphQL errors, or after
+    a bounded number of 429 retries. The key is only sent in the Authorization
+    header — it is never included in a log line or in state.
+    """
+    key = _buffer_api_key()
+    if not key:
+        print("[buffer] BUFFER_API_KEY is not set; skipping")
+        return None
+    for attempt in range(BUFFER_MAX_RETRIES + 1):
+        try:
+            resp = requests.post(
+                BUFFER_API_URL,
+                headers={
+                    "Authorization": f"Bearer {key}",
+                    "Content-Type": "application/json",
+                },
+                json={"query": query},
+                timeout=30,
+            )
+        except Exception as exc:
+            print(f"[buffer] request failed: {type(exc).__name__}")
+            return None
+
+        status = getattr(resp, "status_code", None)
+        if status == 429 and attempt < BUFFER_MAX_RETRIES:
+            wait = _retry_after_seconds(resp)
+            print(f"[buffer] rate limited (429); retry "
+                  f"{attempt + 1}/{BUFFER_MAX_RETRIES} in {wait:.0f}s")
+            time.sleep(wait)
+            continue
+        if status is None or status >= 400:
+            detail = (getattr(resp, "text", "") or "")[:200]
+            print(f"[buffer] HTTP {status}: {detail}")
+            return None
+        try:
+            payload = resp.json()
+        except Exception:
+            print("[buffer] response was not JSON")
+            return None
+        if not isinstance(payload, dict):
+            print("[buffer] response JSON was not an object")
+            return None
+        errors = payload.get("errors")
+        if errors:
+            items = errors if isinstance(errors, list) else [errors]
+            messages = [
+                str(err.get("message") or err) if isinstance(err, dict) else str(err)
+                for err in items
+            ]
+            print(f"[buffer] GraphQL error: {'; '.join(messages)[:300]}")
+            return None
+        data = payload.get("data")
+        return data if isinstance(data, dict) else payload
+    return None
+
+
+def _buffer_caption(manifest: dict, cfg: dict | None = None) -> str:
+    """Headline + truncated script + source URL + hashtags, within Buffer's limit."""
+    story = manifest.get("story") or {}
+    headline = str(story.get("headline") or "").strip()
+    script = str(story.get("script") or "").strip()
+    source = str(story.get("source") or "").strip()
+    url = str(story.get("url") or "").strip()
+    pcfg = (cfg or {}).get("publish") or {}
+    hashtags = str(pcfg.get("buffer_hashtags")
+                   or "#Bollywood #BiggBoss #EntertainmentNews #Shorts")
+    caption = (
+        f"{headline}\n\n{script[:500]}\n\n"
+        f"स्रोत: {source} — {url}\n"
+        f"{hashtags}"
+    )
+    return caption[:2200]
+
+
+def buffer_post(
+    video_url: str, manifest: dict, cfg: dict, platform: str
+) -> dict | None:
+    """Queue a public MP4 on one Buffer channel.
+
+    Uses a long-lived personal key, ``schedulingType: automatic`` and
+    ``mode: addToQueue`` — no per-run OAuth, app verification or monthly login.
+    Returns ``{post_id, platform, posted_at}`` or None on any failure.
+    """
+    platform = str(platform or "").strip().lower()
+    if platform not in BUFFER_CHANNEL_ENV:
+        print(f"[buffer] unsupported platform: {platform}")
+        return None
+    # Ledger guard: a recorded id for this platform means never post twice.
+    if _already_published(manifest, platform):
+        print(f"[buffer] {platform} already published for this reel; skipping")
+        return manifest["published"][platform]
+
+    channel_id = _buffer_channel_id(platform)
+    if not (_buffer_api_key() and channel_id):
+        print(f"[buffer] missing API key or {platform} channel id; skipping")
+        return None
+    if not video_url:
+        print("[buffer] a public video URL is required; skipping")
+        return None
+
+    query = (
+        "mutation CreatePost {\n"
+        "  createPost(input: {\n"
+        f"    text: {json.dumps(_buffer_caption(manifest, cfg), ensure_ascii=False)}\n"
+        f"    channelId: {json.dumps(channel_id)}\n"
+        "    schedulingType: automatic\n"
+        "    mode: addToQueue\n"
+        "    assets: [{ video: { url: "
+        f"{json.dumps(video_url)}, metadata: {{ thumbnailOffset: 2000 }} }} }}]\n"
+        "  }) {\n"
+        "    ... on PostActionSuccess {\n"
+        "      post { id text dueAt }\n"
+        "    }\n"
+        "    ... on MutationError {\n"
+        "      message\n"
+        "    }\n"
+        "  }\n"
+        "}"
+    )
+    data = buffer_request(query)
+    if not data:
+        return None
+    action = data.get("createPost")
+    if not isinstance(action, dict):
+        return None
+    # The documented union returns a nested ``post``; accept a flat success
+    # object too so a minor API shape change cannot silently lose the id.
+    post = action.get("post") if isinstance(action.get("post"), dict) else action
+    if post.get("id"):
+        return {
+            "post_id": str(post["id"]),
+            "platform": platform,
+            "posted_at": datetime.now(timezone.utc).isoformat(),
+        }
+    message = action.get("message")
+    if message:
+        print(f"[buffer] mutation error: {str(message)[:300]}")
+    else:
+        print("[buffer] createPost returned no post id")
+    return None
+
+
 # ---------- orchestration ----------
 def publish_all(
     video_path: str | Path, video_url: str, manifest: dict, cfg: dict
 ) -> dict:
-    """Run enabled platforms and record their ids in the manifest ledger."""
+    """Run the configured publisher and record platform ids in the ledger.
+
+    ``provider: buffer`` posts through Buffer whenever a key and channel ids are
+    present. Otherwise the legacy direct uploaders run, and only for platforms
+    whose flags are true — with Buffer active those flags stay false in config
+    so the same reel is never posted twice.
+    """
     pcfg = cfg.get("publish") or {}
+    provider = str(pcfg.get("provider") or "direct").strip().lower()
     result: dict[str, Any] = {}
-    if pcfg.get("youtube", True):
-        result["youtube"] = youtube_upload(video_path, video_url, manifest, cfg)
-    if pcfg.get("instagram", True):
-        result["instagram"] = instagram_upload(video_url, manifest, cfg)
+    if provider == "buffer" and buffer_creds_present():
+        for platform in BUFFER_CHANNEL_ENV:
+            if not _buffer_channel_id(platform):
+                continue
+            result[platform] = buffer_post(video_url, manifest, cfg, platform)
+    else:
+        if pcfg.get("youtube", True):
+            result["youtube"] = youtube_upload(video_path, video_url, manifest, cfg)
+        if pcfg.get("instagram", True):
+            result["instagram"] = instagram_upload(video_url, manifest, cfg)
 
     ledger = manifest.setdefault("published", {})
     if isinstance(ledger, dict):

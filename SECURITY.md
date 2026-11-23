@@ -28,38 +28,63 @@ the environment, and the Function reads its own site variables). Tests use
 dummy placeholder strings only — never real values. A local backup of the
 credential values exists outside the repository and is never committed.
 
+**After initial setup the automation needs no GitHub PAT and no Netlify PAT.**
+The built-in `GITHUB_TOKEN` with `contents: read` is enough for CI; a GitHub PAT
+was only used once to create and push the repository. The Netlify token is a
+**long-lived, user-supplied token** used only for private Blob state/media
+reads and writes — **no Netlify deploy is performed**. Buffer and OneSignal keys
+are long-lived too, so **no monthly login or renewal is required**: attention is
+needed only if a credential is revoked/expires or a platform changes policy.
+Publishing is rate-limited in code (≤2 posts/day, ≥3h spacing, varied stories,
+official APIs only) as risk reduction, but no service can guarantee a platform
+will never limit reach.
+
 ### Secret inventory (names only — never commit values)
 
-**Netlify — state, uploads and public video delivery**
+**Netlify — state blobs and public video delivery (no deploys)**
 
-- `NETLIFY_AUTH_TOKEN` — Netlify personal access token. Used **twice**:
+- `NETLIFY_AUTH_TOKEN` — **long-lived, user-supplied** Netlify token. Used
+  **twice**, only for private Blob reads/writes — never for a deploy:
   - as an encrypted **GitHub Actions secret**, where the pinned `netlify-cli@24`
-    uses it for the private `reel-state` ledger and for uploading MP4s to
+    uses it for the private `reel-state` state blobs and for uploading MP4s to
     `reels-media`;
   - as a **Netlify site environment variable**, where
     [`netlify/functions/video.mjs`](netlify/functions/video.mjs) passes it (with
     the site ID) to `@netlify/blobs` so the public `/r/<ascii-key>` URL can
     stream the MP4 with HTTP Range support. Actions secrets are **not** visible
-    to the deployed Function, so this site-level variable is required.
+    to the Function, so this site-level variable is required.
 - `NETLIFY_SITE_ID` — site identifier (not secret, but kept alongside the token
   in both Actions and the Netlify site environment).
-- `NETLIFY_AUTH_TOKEN` is currently configured in both places. **Rotate it** —
-  see below.
+- `NETLIFY_AUTH_TOKEN` is configured in both places. It is long-lived and needs
+  no monthly rotation; rotate only if revoked, expired or suspected exposed.
 
-**GitHub automation**
+**GitHub automation (no PAT in the automation)**
 
-- `GH_PAT` — GitHub personal access token, stored as an encrypted Actions
-  secret for optional external triggers/backups. The scheduled workflow itself
-  needs no PAT: it uses the built-in `GITHUB_TOKEN` with `contents: read` and
-  the Netlify keep-alive is an unauthenticated HTTPS GET. **Rotate it** — it was
-  shared in chat.
+- `GH_PAT` — GitHub personal access token. **Not used by the automation after
+  setup** — it was only for initial repository creation/push. The scheduled
+  workflow uses the built-in `GITHUB_TOKEN` with `contents: read`, writes no git
+  state, and the Netlify keep-alive is an unauthenticated HTTPS GET. No GitHub
+  PAT is needed for any scheduled or manual run.
+
+**Buffer publishing (primary — official API)**
+
+- `BUFFER_API_KEY` — long-lived personal Buffer API key. No monthly login and
+  no Meta/Google app verification.
+- `BUFFER_YT_CHANNEL_ID` — Buffer channel id for the connected YouTube account.
+- `BUFFER_IG_CHANNEL_ID` — Buffer channel id for the connected Instagram
+  account.
+- All three are encrypted Actions secrets injected into the *Generate reel*
+  step. The key is a credential; the channel ids are identifiers. No Buffer
+  value is ever committed or printed in logs.
 
 **Failure notifications (OneSignal)**
 
 - `ONESIGNAL_APP_ID` — public app identifier, configured.
-- `ONESIGNAL_REST_API_KEY` — REST key used by `notify_failure.py`; configured,
-  Web Push enabled, a device subscribed, and live delivery verified
-  (`successful: 1, failed: 0`). **Rotate it** — it was shared in chat.
+- `ONESIGNAL_REST_API_KEY` — long-lived REST key used by `notify_failure.py`;
+  configured, Web Push enabled, a device subscribed, and live delivery verified
+  (`successful: 1, failed: 0`). Alerts are **failure-only** (`if: failure()`);
+  there are no success notifications. Rotate only if revoked/expired or
+  suspected exposed.
 
 **Private state, optional Vercel fallback**
 
@@ -68,33 +93,42 @@ credential values exists outside the repository and is never committed.
 - `BLOB_VIDEO_TOKEN`, `BLOB_VIDEO_STORE_ID` — optional Vercel Blob public MP4
   fallback (Netlify `reels-media` is active).
 
-**Optional publishing**
+**Optional direct-publishing fallback**
 
-- `YT_CLIENT_ID`, `YT_CLIENT_SECRET`, `YT_REFRESH_TOKEN` — YouTube Shorts.
-- `IG_LONG_LIVED_TOKEN`, `IG_USER_ID` — Instagram Reels.
+- `YT_CLIENT_ID`, `YT_CLIENT_SECRET`, `YT_REFRESH_TOKEN` — direct YouTube Shorts
+  fallback (Buffer is the primary publisher).
+- `IG_LONG_LIVED_TOKEN`, `IG_USER_ID` — direct Instagram Reels fallback.
 
 All of the optional values above are absent by default; the corresponding steps
-skip cleanly and the workflow still produces MP4 artifacts.
+skip cleanly, Buffer remains the primary publisher, and the workflow still
+produces MP4 artifacts.
 
 ## Rotation guidance
 
-Rotate a credential by generating a **new** value at the provider, replacing the
-corresponding encrypted Actions secret (and any Netlify site variable), and
-revoking the old value. Prefer a short overlap window and re-run the workflow to
-confirm. **The GitHub PAT, Netlify PAT and OneSignal REST key were shared in
-chat and should be rotated first.**
+All long-lived credentials (Buffer, OneSignal, Netlify, GitHub) require **no
+monthly rotation**. Rotate one only when it is revoked, expires, or is suspected
+exposed: generate a new value at the provider, replace the encrypted Actions
+secret (and any Netlify site variable), and revoke the old value. Prefer a short
+overlap window and re-run the workflow to confirm. The GitHub PAT is no longer
+used by the automation, so it does not need rotation for CI to keep working.
 
-- **GitHub PAT (`GH_PAT`):** revoke/delete the old token under GitHub settings →
-  Developer settings → Personal access tokens, create a new one with the
-  minimum scopes needed (this project does not need repo write access), then
-  update the Actions secret. If a PAT was ever committed, revoke it immediately
-  — git history is public.
-- **Netlify PAT (`NETLIFY_AUTH_TOKEN`, with `NETLIFY_SITE_ID`):** create a new
-  personal access token in Netlify user settings, replace **both** copies — the
-  encrypted Actions secret *and* the Netlify site environment variable used by
-  the video Function — then revoke the old token. Verify the Function still
-  serves `/r/reels/<id>.mp4` with a `206` Range response. The site ID is an
-  identifier, not a secret, but keep it consistent with the token's account.
+- **GitHub PAT (`GH_PAT`):** no longer used by the automation; keep it only for
+  repo administration/backups. If it was ever exposed or committed, revoke it
+  immediately (git history is public) and re-issue only if you still need it.
+  CI itself uses the built-in `GITHUB_TOKEN` with `contents: read`.
+- **Netlify token (`NETLIFY_AUTH_TOKEN`, with `NETLIFY_SITE_ID`):** this is a
+  long-lived, user-supplied token used only for Blob state/media — **not for
+  deploys**. If it must be rotated, create a new token in Netlify user settings,
+  replace **both** copies — the encrypted Actions secret *and* the Netlify site
+  environment variable used by the video Function — then revoke the old token.
+  Verify the Function still serves `/r/reels/<id>.mp4` with a `206` Range
+  response. The site ID is an identifier, not a secret, but keep it consistent
+  with the token's account.
+- **Buffer (`BUFFER_API_KEY`, with `BUFFER_YT_CHANNEL_ID` /
+  `BUFFER_IG_CHANNEL_ID`):** the key is long-lived; rotate it in the Buffer
+  dashboard if it is revoked or suspected exposed, then update the Actions
+  secret. The channel ids are identifiers and change only if you reconnect a
+  social account. No monthly login or app verification is involved.
 - **OneSignal key (`ONESIGNAL_REST_API_KEY`, with `ONESIGNAL_APP_ID`):** regenerate
   the REST API key in the OneSignal dashboard (App Settings → Keys & IDs),
   update the Actions secret, revoke the previous key, and re-run
@@ -131,6 +165,6 @@ values.
 ## Verifying no secrets are committed
 
 ```bash
-git grep -nE 'ghp_[A-Za-z0-9]|nfp_[A-Za-z0-9]|os_v2_[A-Za-z0-9]|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' -- '*.md'
+git grep -nE 'ghp_[A-Za-z0-9]|nfp_[A-Za-z0-9]|os_v2_[A-Za-z0-9]|buf_[A-Za-z0-9]|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' -- '*.md'
 # expected: no output / non-zero exit status
 ```

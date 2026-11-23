@@ -45,6 +45,23 @@ from ever being committed.
   applies the same 7-day rolling cleanup; it is not the active host.
 - Local `work/` / `out/` copies are deleted after rendering in CI; the 2-day
   artifact window exists only for debugging failed runs.
+- The private state ledger (`reel-state`) keeps only metadata records and is
+  pruned after **30 days**; no image, audio or video bytes are ever stored there.
+
+### Buffer posting and retention
+
+Publishing is **Buffer-first**: a reel is handed to Buffer's official API with a
+long-lived personal API key (no monthly login and no Meta/Google app
+verification), and Buffer delivers it to the connected YouTube/Instagram
+channels. Buffer hosts the scheduled/queued post under **Buffer's own retention
+policy**; once published, the YouTube/Instagram reel is governed by those
+platforms' retention and visibility rules. **No media is committed to this
+repository** at any point — the reel is generated in ignored local/CI
+directories, optionally mirrored to the 7-day `reels-media` blob, and posted via
+official APIs. Posts are deliberately paced (at most 2/day, at least 3 hours
+apart, varied stories; no mass posting, bots or session cookies), which reduces
+risk but cannot guarantee a platform will never limit reach. Our own copies
+expire on the schedules above regardless of what a platform retains.
 
 ## How third-party content is used
 
@@ -74,8 +91,9 @@ Source attribution is recorded, not hidden:
 
 - Every run writes a manifest (`out/*.manifest.json`) including the source
   outlet and article URL.
-- The source URL and credit are included in the YouTube/Instagram platform
-  description, so the published reel points back to the publisher.
+- The source URL and credit are included in the platform description (including
+  posts delivered through Buffer), so the published reel points back to the
+  publisher.
 - Feed/output settings and `preferred_sources` in `config.yaml` make the
   sourced outlets explicit.
 
@@ -98,7 +116,9 @@ We will, on request and at our discretion:
 
 Because reference material is used transiently and only metadata is retained,
 removing a source is fast and leaves no media behind in this repository. Hosted
-MP4s expire within 7 days even without a request, and CI artifacts within 2 days.
+MP4s expire within 7 days even without a request, CI artifacts within 2 days and
+state metadata within 30 days; Buffer/platform retention for already-published
+reels is governed by those services and may be requested from them directly.
 
 ## Fair use / commentary context
 
