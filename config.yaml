@@ -1,4 +1,4 @@
-# Bollywood Reel Generator — configuration
+# YT Bolly — configuration
 # No LLM. Script is assembled deterministically from headline + lead + body,
 # then rendered in Hindi via a free machine-translation service.
 

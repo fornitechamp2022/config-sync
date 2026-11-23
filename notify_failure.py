@@ -73,13 +73,13 @@ def build_payload(
     run_url = None if test_mode else build_run_url(env)
 
     if test_mode:
-        heading = "Bollywood Reels - TEST (credential check)"
+        heading = "YT Bolly - TEST (credential check)"
         contents = (
-            "This is a test push from the Bollywood Reels generator. "
+            "This is a test push from the YT Bolly generator. "
             "No action needed."
         )
     else:
-        workflow = env.get("GITHUB_WORKFLOW") or "Bollywood Reels"
+        workflow = env.get("GITHUB_WORKFLOW") or "YT Bolly"
         repo = env.get("GITHUB_REPOSITORY") or ""
         subject = f"{workflow} failed" + (f" in {repo}" if repo else "")
         contents = (
@@ -87,7 +87,7 @@ def build_payload(
             if run_url
             else f"{subject}. Check GitHub Actions for details."
         )
-        heading = "Bollywood Reels: run failed"
+        heading = "YT Bolly: run failed"
 
     payload = {
         "app_id": app_id,
@@ -181,7 +181,7 @@ def send_notification(payload: dict, api_key: str, secrets: tuple[str, ...] = ()
 
 def _run(argv: list[str] | None) -> int:
     parser = argparse.ArgumentParser(
-        description="Send a OneSignal push about a failed Bollywood Reels run."
+        description="Send a OneSignal push about a failed YT Bolly run."
     )
     parser.add_argument(
         "--test",

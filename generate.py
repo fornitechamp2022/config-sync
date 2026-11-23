@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Bollywood Reel Generator — deterministic, no LLM.
+"""YT Bolly — deterministic, no LLM.
 
 Examples:
   python generate.py --check                 # discover + gate + QA flag report

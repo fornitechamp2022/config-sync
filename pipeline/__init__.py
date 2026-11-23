@@ -1,1 +1,1 @@
-"""Bollywood Reel Generator pipeline modules."""
+"""YT Bolly pipeline modules."""

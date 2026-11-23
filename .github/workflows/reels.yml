@@ -1,16 +1,19 @@
-name: Bollywood Reels
+name: YT Bolly
 
 # Every six hours, plus manual runs. The generator appends to its own ledger,
 # so no git writes (and no write token) are required. CI uses only the built-in
 # GITHUB_TOKEN with contents:read — no GitHub PAT and no Netlify PAT/login, and
 # no Netlify deploy step. All publishing goes through the official Buffer API.
+# Credentials are encrypted Actions secrets (${{ secrets.* }}); non-secret
+# configuration comes from Actions variables (${{ vars.* }}). Never place a
+# value in a workflow step, a log line, or a command argument.
 on:
   schedule:
     - cron: "0 */6 * * *"
   workflow_dispatch:
 
 concurrency:
-  group: bollywood-reels
+  group: yt-bolly
   cancel-in-progress: false
 
 permissions:
@@ -75,8 +78,11 @@ jobs:
         # Netlify's free plan can pause projects with no traffic. A plain HTTPS
         # GET keeps the site active; this is not a deploy and uses no build
         # credits. || true means a temporary outage never fails the job.
+        # The URL is a non-secret Actions variable, never a literal in a step.
+        env:
+          NETLIFY_SITE_URL: ${{ vars.NETLIFY_SITE_URL }}
         run: |
-          curl --fail --silent --show-error --max-time 20 https://bollywood-reel-generator.netlify.app > /dev/null || true
+          [ -n "$NETLIFY_SITE_URL" ] && curl --fail --silent --show-error --max-time 20 "$NETLIFY_SITE_URL" > /dev/null || true
 
       - name: Upload artifacts
         if: always()

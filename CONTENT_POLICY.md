@@ -1,4 +1,4 @@
-# Content policy
+# YT Bolly — content policy
 
 This repository is **code only**. It is published on public git hosts (GitHub,
 and may be mirrored to GitLab) as a software project — not as a media library.

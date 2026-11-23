@@ -77,7 +77,7 @@ def set_creds(monkeypatch, app_id=APP_ID, api_key=API_KEY):
 def set_github_context(monkeypatch):
     monkeypatch.setenv("GITHUB_REPOSITORY", "owner/repo")
     monkeypatch.setenv("GITHUB_RUN_ID", "42")
-    monkeypatch.setenv("GITHUB_WORKFLOW", "Bollywood Reels")
+    monkeypatch.setenv("GITHUB_WORKFLOW", "YT Bolly")
     monkeypatch.setenv("GITHUB_SERVER_URL", "https://github.com")
 
 
@@ -157,7 +157,7 @@ def test_build_payload_targets_all_devices_with_filters():
         "GITHUB_SERVER_URL": "https://github.com",
         "GITHUB_REPOSITORY": "owner/repo",
         "GITHUB_RUN_ID": "42",
-        "GITHUB_WORKFLOW": "Bollywood Reels",
+        "GITHUB_WORKFLOW": "YT Bolly",
     }
     failure = notify.build_payload(APP_ID, env=env)
     assert failure["target_channel"] == "push"
@@ -355,7 +355,10 @@ def test_workflow_wiring():
     )
 
     keepalive = next(step for step in steps if "Keep Netlify" in step.get("name", ""))
-    assert "https://bollywood-reel-generator.netlify.app" in keepalive["run"]
+    # Non-secret configuration is injected from an Actions variable; no
+    # literal site URL (and no credential) belongs in the workflow file.
+    assert keepalive["env"]["NETLIFY_SITE_URL"] == "${{ vars.NETLIFY_SITE_URL }}"
+    assert '"$NETLIFY_SITE_URL"' in keepalive["run"]
     assert "|| true" in keepalive["run"]
     assert "--fail" in keepalive["run"]
 
@@ -363,6 +366,7 @@ def test_workflow_wiring():
     assert not any("deploy" in run and "netlify" in run.lower() for run in runs)
 
     # Existing steps and secrets remain intact.
+    assert data["name"] == "YT Bolly"
     assert any("hyperframes@0.9.77" in run for run in runs)
     assert any("netlify-cli@24" in run for run in runs)
     generate_env = next(step for step in steps if step.get("name") == "Generate reel")["env"]
@@ -371,5 +375,6 @@ def test_workflow_wiring():
         "BLOB_STATE_STORE_ID", "BLOB_VIDEO_TOKEN", "BLOB_VIDEO_STORE_ID",
         "YT_CLIENT_ID", "YT_CLIENT_SECRET", "YT_REFRESH_TOKEN",
         "IG_LONG_LIVED_TOKEN", "IG_USER_ID",
+        "BUFFER_API_KEY", "BUFFER_YT_CHANNEL_ID", "BUFFER_IG_CHANNEL_ID",
     ):
         assert generate_env[secret] == "${{ secrets.%s }}" % secret

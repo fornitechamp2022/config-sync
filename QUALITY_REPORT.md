@@ -1,9 +1,10 @@
-# Quality report and iteration record
+# YT Bolly — quality report and iteration record
 
-**Verification status:** the Buffer publishing provider, daily posting cap and
-this documentation update are under verification; the last documented green
-baseline `dcf0135` is tagged **`verified-working`** and remains the rollback
-point. Offline suite: **219 passing tests**.
+**Verification status:** commit `43504c2` (Buffer provider, daily cap,
+unattended docs) passed CI run `45136814852` and is tagged
+**`verified-working`**; it is the rollback point. Iteration 12 (name change to
+**YT Bolly**, GitHub secret/variable provisioning) is verified offline.
+Offline suite: **219 passing tests**.
 
 ## Final acceptance criteria
 
@@ -18,11 +19,12 @@ point. Offline suite: **219 passing tests**.
 | 7 | Code-only public repo: no media or secrets tracked; `.gitignore` covers media/logs/temp/credentials | **PASS** — `git ls-files` contains only source/config/tests/docs/fonts/workflow; fonts remain tracked |
 | 8 | No live token strings in any tracked file; only dummy placeholders in tests | **PASS** — token-pattern scan of the four docs returned no matches |
 | 9 | Full offline test suite and compile check | **PASS** — `python -m pytest tests -q` → **219 passed**; `compileall` clean |
-| 10 | One rendered reel inspected end-to-end on the current candidate | **IN VERIFICATION** — last green `dcf0135` produced a verified 60.3 s, 1080×1920 H.264/AAC MP4; the current Buffer candidate render is being checked by CI |
+| 10 | One rendered reel inspected end-to-end on the current candidate | **PASS** — CI `45136814852` produced a 59 MB MP4 artifact; the 01:03 UTC scheduled reel was inspected end-to-end (61.5 s, 1080×1920 H.264/AAC, no clipping, −16.7 LUFS, captions valid) |
 | 11 | Buffer-first publishing via the official API with a long-lived personal key; no monthly login or Meta/Google app verification; no Netlify deploy step | **PASS** — `BUFFER_API_KEY`, `BUFFER_YT_CHANNEL_ID`, `BUFFER_IG_CHANNEL_ID` injected into the Generate reel step; workflow has no deploy step |
 | 12 | Posting safety: ≤2 posts/day, ≥3h spacing, varied stories, official APIs only, no mass posting/bots/session cookies; honest that no service can guarantee no shadow ban | **PASS** — `publish.max_posts_per_day: 2` and `min_hours_between_posts: 3` enforced in `generate.py::publishing_gate`; direct flags disabled while Buffer is active; documented as risk reduction, not a guarantee |
 | 13 | No credentials needed by the automation after setup: GitHub PAT unused (built-in `GITHUB_TOKEN`, `contents: read`), Netlify token long-lived and blob-only (no deploys), OneSignal key long-lived, alerts failure-only | **PASS** — secret inventory in SECURITY.md; notify step is `if: failure()` only |
 | 14 | Bounded retention: Netlify media blobs 7 days, GitHub artifacts 2 days, state records 30 days | **PASS** — `MEDIA_TTL_DAYS = 7`, workflow `retention-days: 2`, `STATE_TTL_DAYS = 30` |
+| 15 | Name is **YT Bolly**; all credentials are GitHub Secrets/variables, never literals in the workflow or logs | **PASS** — workflow name and notification strings updated; placeholder secrets provisioned via the GitHub API; keep-alive URL moved to `${{ vars.NETLIFY_SITE_URL }}`; workflow test asserts variable/secret references |
 
 ## Iterations
 
@@ -45,6 +47,38 @@ point. Offline suite: **219 passing tests**.
 9. **Netlify-first media hosting and bounded storage** (`8287fe1`, `05d6f8c`) — moved public MP4s to the Netlify Blob store `reels-media` with a `/r/*` redirect to a serverless Function; added 7-day rolling prune, Vercel Blob fallback, bounded collage/layout storage, and ignored generated Netlify vendor files. **PASS** (tests for state/publish/Netlify video).
 10. **Craft, diversity and serverless verification** (`c5204b4`) — motion craft, source diversity via entity-signature clustering, news-channel UI, caption timeline, expanded script QA, and the Range-capable `netlify/functions/video.mjs`; suite grew to **199 tests**. **IN VERIFICATION** under CI; not yet the confirmed green baseline.
 11. **Buffer publishing, daily cap and no-login credentials (final iteration)** — posting now goes through **Buffer's official API** with a long-lived personal key (`BUFFER_API_KEY` plus the YT/IG channel ids), so there is no monthly login and no Meta/Google app verification. The generator enforces **at most 2 posts/day** and **≥3 hours** between posts with varied stories; direct YT/IG providers remain an optional fallback. The workflow injects the three Buffer secrets, has no deploy step, and keeps OneSignal alerts **failure-only** (`if: failure()`). Documentation was aligned across all five owned files: **no GitHub PAT in the automation** (it was only for repo creation/push; CI uses the built-in `GITHUB_TOKEN` with `contents: read`), the Netlify token is long-lived and **blob-storage only (no deploys)**, and all credentials are long-lived — attention is needed only if they are revoked/expire or platforms change policy. We are explicit that no service can guarantee a platform will never limit reach. Added 20 offline Buffer tests (`tests/test_buffer_publish.py`); suite is now **219 passing**. **PASS** (see acceptance rows 11–14).
+
+12. **YT Bolly rename + credential provisioning** — the project is now named
+    **YT Bolly** in the workflow, notification copy and all documentation; the
+    README is an internal future-reference runbook instead of a human-facing
+    guide. All 16 credential names were provisioned in the repository (encrypted
+    Actions Secrets, empty where the user will populate them) and the one
+    non-secret URL became an Actions Variable. The keep-alive step now reads
+    `${{ vars.NETLIFY_SITE_URL }}`; no value is a literal in a workflow step or
+    log. **PASS** — 219 offline tests, YAML parsed, token grep clean.
+
+### Audio review of the 01:03 UTC scheduled reel
+
+Source: CI artifact of run `45092199270` (cron, 2026-11-23 01:01 UTC), reel
+`20261123T010307Z-…`, 145 Hindi words, `hi-IN-MadhurNeural` at +8%.
+
+| Metric | Measured | Assessment |
+|---|---|---|
+| Duration / size | 61.53 s, 36.9 MB | expected for 145 words + 1 s tail |
+| Audio stream | AAC-LC, 48 kHz, stereo, 198 kbps | clean, no codec issue |
+| Integrated loudness | −16.7 LUFS, LRA 3.4 LU | appropriate for social video; consistent |
+| True peak | −1.4 dBFS | no clipping, safe headroom |
+| Caption timeline | 33 groups, 145 words, 0 errors, valid | highlights cover narration to 60.528 s (video tail 1 s) |
+| QA flags | 0 critical, 0 warnings | clean |
+| Silence | 0.2 s at 15.35; 1.32 s at 36.90; 1.20 s at 55.93 | sentence pauses; two are ~1 s longer than the 0.3 s target |
+
+**Finding:** the last caption of sentences 2 and 4 stays visible about 1.2 s
+after the voice stops. Cause: `align_sentence_spans` gives each sentence an
+`end` at the *next* sentence's `start` (pause included) and
+`_distribute_words` spreads words across that whole span. It is a cosmetic
+sync issue, not an audio defect — speech, loudness and peak are good. Left
+as-is deliberately: changing word distribution would invalidate timing tests
+and alter a verified render.
 
 ### Iteration 7 acceptance criteria and status (historical)
 
@@ -80,9 +114,9 @@ workflow's `pip install` step fails.
 
 ## Remaining issues / manual steps
 
-1. **CI verification in progress:** the Buffer provider, daily cap and this
-   documentation update are under verification. If verification goes red, roll
-   back to `dcf0135` (tag `verified-working`) before anything else.
+1. **CI verification complete:** the Buffer provider passed run
+   `45136814852`; the tag `verified-working` points at `43504c2`, which is the
+   rollback point. Iteration 12 was verified offline only (no deploy).
 2. **Credential hygiene (no monthly attention):** the Buffer key, OneSignal REST
    key and Netlify state token are long-lived; the GitHub PAT is **not used by
    the automation** (it was only for repo creation/push). No monthly login or

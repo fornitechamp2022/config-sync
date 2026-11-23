@@ -1,4 +1,4 @@
-# Security policy
+# YT Bolly — security policy
 
 ## Reporting a vulnerability or a secrets exposure
 
@@ -27,6 +27,13 @@ command-line arguments or logs (the Netlify CLI reads `NETLIFY_AUTH_TOKEN` from
 the environment, and the Function reads its own site variables). Tests use
 dummy placeholder strings only — never real values. A local backup of the
 credential values exists outside the repository and is never committed.
+
+All credential names were provisioned in the repository via the GitHub API as
+encrypted Actions Secrets; empty values are placeholders for the user to fill
+in **Settings → Secrets and variables → Actions → Secrets**. Non-secret
+configuration (the keep-alive URL) is an Actions Variable referenced as
+`${{ vars.NETLIFY_SITE_URL }}`; it is not a credential and is deliberately kept
+out of workflow literals. No value is logged, printed or committed.
 
 **After initial setup the automation needs no GitHub PAT and no Netlify PAT.**
 The built-in `GITHUB_TOKEN` with `contents: read` is enough for CI; a GitHub PAT
