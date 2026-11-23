@@ -3,8 +3,9 @@
 **Verification status:** commit `43504c2` (Buffer provider, daily cap,
 unattended docs) passed CI run `45136814852` and is tagged
 **`verified-working`**; it is the rollback point. Iteration 12 (name change to
-**YT Bolly**, GitHub secret/variable provisioning) is verified offline.
-Offline suite: **219 passing tests**.
+**YT Bolly**, GitHub secret/variable provisioning) passed CI run
+`45159758735` and is now tagged **`verified-working`**. Offline suite:
+**219 passing tests**.
 
 ## Final acceptance criteria
 
