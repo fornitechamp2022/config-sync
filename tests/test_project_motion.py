@@ -171,7 +171,7 @@ def test_lower_third_pulse_is_a_single_child_beat(project):
 
 def test_clean_outro_fades_the_whole_graphics_package(project):
     js = project["index"]
-    for target in ("lowerpanel", "tickerinner", "breakinginner", "bugpanel"):
+    for target in ("lowerpanel", "tickerinner", "mastheadinner", "bugpanel"):
         assert re.search(rf'tl\.to\("#{target}", \{{opacity:0', js), target
     outro = round(project["result"]["duration"] - 1.1, 2)
     assert js.count(f"}}, {outro});") >= 4
@@ -216,9 +216,9 @@ def test_no_tween_targets_a_clip_host(project):
 def test_text_safe_zones_and_captions_untouched(project):
     caps = project["caps"]
     group_css = re.search(r"\.cap-group\{([^}]+)\}", caps).group(1)
-    assert "left:150px" in group_css
-    assert "right:150px" in group_css
-    assert "bottom:740px" in group_css
+    assert "left:120px" in group_css
+    assert "right:120px" in group_css
+    assert "bottom:760px" in group_css
     assert 'data-composition-id="captions"' in project["index"]
     assert 'data-track-kind="captions"' in project["index"]
     assert URL not in project["index"] and URL not in caps

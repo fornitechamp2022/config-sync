@@ -1,12 +1,14 @@
 """Source-image validation, dedupe and premium vertical collage baking.
 
 Every still is exactly ``1080x1920`` (or whatever the configured canvas is):
-sharp, full-resolution news panels floating over a darkened blurred fill.
-Panels are cropped from the source at *native* resolution and only ever
-resized downwards, so the collage never shows upscaling blur. A deterministic
-set of four layout templates (hero-left, hero-right, triptych, grid) cycles
-with the shot index so consecutive shots never share a framing, and identical
-Pillow colour grading makes the panels read as one channel package.
+sharp, full-resolution news panels laid out as a TV-studio wall that runs edge
+to edge with only hairline gutters. There is no empty blurred band: the panels
+themselves carry the frame from y=0 to y=canvas_h, and the blurred source is
+only visible in the 6 px seams. Panels are cropped at *native* resolution and
+only ever resized downwards, so the collage never shows upscaling blur. A
+deterministic set of four layout templates (hero-left, hero-right, triptych,
+grid) cycles with the shot index so consecutive shots never share a framing,
+and identical Pillow colour grading makes the panels read as one package.
 """
 from __future__ import annotations
 
@@ -55,12 +57,21 @@ ACCENTS: tuple[tuple[int, int, int], ...] = (
     (225, 29, 46),
 )
 
-# Collage geometry as fractions of the canvas. Keeping the panels in the
-# upper-middle band leaves clean negative space for the breaking band, the
-# lower-third, the captions and the ticker drawn by pipeline/project.py.
-_STAGE_TOP = 0.17
-_STAGE_HEIGHT = 0.36
-_SCRIM_TOP = 0.52
+# Studio-wall geometry. Panels are full-bleed with only slim seams, so no
+# contiguous plain-background band can appear anywhere in the frame. The
+# broadcaster graphics in pipeline/project.py (breaking band, lower third,
+# ticker, captions) sit on their own translucent panels and stay legible over
+# the photography; only the very bottom gets a light caption scrim.
+_GUTTER_FRAC = 0.006          # ~6 px at 1080 wide — hairline studio seams
+_HERO_FRAC = 0.49             # just under half so every panel is >= 25% of area
+_HERO_ROW_FRAC = 0.485        # horizontal hero band for the triptych variant
+_SCRIM_TOP = 0.78             # gentle darkening of the final ~22% only
+_SCRIM_ALPHA = 118            # light enough to keep the lower panels readable
+
+
+def _gutter(canvas_w: int) -> int:
+    """Width of a studio seam, scaled to the canvas but never zero."""
+    return max(6, int(canvas_w * _GUTTER_FRAC))
 
 
 def is_allowed_source(url: str, skip_hosts: tuple[str, ...] = ()) -> bool:
@@ -234,96 +245,126 @@ def panel_tile(image: Image.Image, w: int, h: int) -> Image.Image:
 
 def layout_boxes(canvas_w: int, canvas_h: int,
                  variant: int = 0) -> tuple[str, list[tuple[int, int, int, int]]]:
-    """Deterministic panel rectangles for one shot (3 or 4 panels).
+    """Deterministic studio-wall rectangles for one shot (3 or 4 panels).
 
-    The four templates cycle by shot index. Every panel holds at least 25% of
-    the collage's total image area (grid panels are exactly 25%).
+    The panels fill the canvas edge to edge; only ``_gutter`` px seams show the
+    blurred backing. Four templates cycle by shot index:
+
+    * ``hero-left`` / ``hero-right`` — a full-height hero column on one side,
+      two stacked secondary panels on the other (mirrored between variants).
+    * ``triptych`` — a full-width hero band across the top with two secondary
+      panels filling the lower part.
+    * ``grid`` — four equal cells edge to edge (each exactly 25% of the area).
+
+    Every panel is at least 25% of the total panel area, stays inside the
+    canvas and never overlaps another panel.
     """
     name = LAYOUTS[int(variant) % len(LAYOUTS)]
-    top = int(canvas_h * _STAGE_TOP)
-    bottom = top + int(canvas_h * _STAGE_HEIGHT)
-    w, h = canvas_w, bottom - top
-    # An even stage height lets the four grid cells each be exactly 25% of
-    # the stage (and of the total image area); other templates keep gutters.
-    if h % 2:
-        h -= 1
-        bottom -= 1
-    gap = 0 if name == "grid" else max(6, int(w * 0.007))
+    g = _gutter(canvas_w)
+    w, h = canvas_w, canvas_h
 
     if name in ("hero-left", "hero-right"):
-        hero_w = int(w * 0.48)
+        hero_w = int(w * _HERO_FRAC)
+        side_w = w - hero_w - g
+        split = (h - g) // 2
+        lower = split + g
         if name == "hero-left":
-            hero, sx, right = (0, top, hero_w, bottom), hero_w + gap, w
-        else:
-            hero, sx, right = (w - hero_w, top, w, bottom), 0, w - hero_w - gap
-        split = top + (h - gap) // 2
-        return name, [hero, (sx, top, right, split), (sx, split + gap, right, bottom)]
-
-    if name == "triptych":
-        pw = (w - 2 * gap) // 3
+            return name, [
+                (0, 0, hero_w, h),
+                (hero_w + g, 0, w, split),
+                (hero_w + g, lower, w, h),
+            ]
         return name, [
-            (i * (pw + gap), top, w if i == 2 else (i + 1) * pw + i * gap, bottom)
-            for i in range(3)
+            (w - hero_w, 0, w, h),
+            (0, 0, side_w, split),
+            (0, lower, side_w, h),
         ]
 
-    # Equal-sized cells: a couple of leftover pixels become outer margin.
-    pw, ph = (w - gap) // 2, (h - gap) // 2
-    ox, oy = (w - 2 * pw - gap) // 2, (h - 2 * ph - gap) // 2
-    x0, y0 = ox, top + oy
+    if name == "triptych":
+        hero_h = int(h * _HERO_ROW_FRAC)
+        lower = hero_h + g
+        pw = (w - g) // 2
+        return name, [
+            (0, 0, w, hero_h),
+            (0, lower, pw, h),
+            (pw + g, lower, w, h),
+        ]
+
+    # grid: four equal cells, edge to edge with a single central cross seam.
+    pw, ph = (w - g) // 2, (h - g) // 2
     return name, [
-        (x0, y0, x0 + pw, y0 + ph),
-        (x0 + pw + gap, y0, x0 + 2 * pw + gap, y0 + ph),
-        (x0, y0 + ph + gap, x0 + pw, y0 + 2 * ph + gap),
-        (x0 + pw + gap, y0 + ph + gap, x0 + 2 * pw + gap, y0 + 2 * ph + gap),
+        (0, 0, pw, ph),
+        (pw + g, 0, w, ph),
+        (0, ph + g, pw, h),
+        (pw + g, ph + g, w, h),
     ]
 
 
 def _scrim(image: Image.Image, canvas_w: int, canvas_h: int) -> Image.Image:
-    """Bottom gradient that keeps captions legible over the picture band."""
+    """Light gradient over the final ~22% so captions stay readable.
+
+    The upper 78% of the frame is left completely untouched — the studio
+    panels must stay bright and detailed there. The ramp peaks at a modest
+    alpha, so the lower panels are still recognisable photographs rather than
+    a flat dark band.
+    """
     layer = Image.new("RGBA", (canvas_w, canvas_h), (0, 0, 0, 0))
     draw = ImageDraw.Draw(layer)
     start = int(canvas_h * _SCRIM_TOP)
     for y in range(start, canvas_h):
-        alpha = int(205 * ((y - start) / max(1, canvas_h - start)) ** 1.4)
+        alpha = int(_SCRIM_ALPHA * ((y - start) / max(1, canvas_h - start)) ** 1.6)
         draw.line([(0, y), (canvas_w, y)], fill=(0, 0, 0, alpha))
     return Image.alpha_composite(image.convert("RGBA"), layer).convert("RGB")
 
 
-def bake_still(item: dict, canvas_w: int, canvas_h: int, variant: int = 0) -> Image.Image:
-    """Single-source fallback: sharp contain-fitted image over blurred fill."""
-    src = item["image"]
-    bg = _grade(ImageEnhance.Brightness(
+def _studio_backdrop(src: Image.Image, canvas_w: int, canvas_h: int) -> Image.Image:
+    """Dark blurred fill, now visible only inside the hairline panel seams."""
+    return _grade(ImageEnhance.Brightness(
         _cover(src, canvas_w, canvas_h).filter(ImageFilter.GaussianBlur(46))).enhance(0.42))
-    box_w, box_h = canvas_w, int(canvas_h * 0.40)
-    scale = min(1.0, box_w / src.width, box_h / src.height)
-    fg = src.resize((max(1, int(src.width * scale)), max(1, int(src.height * scale))),
-                    Image.Resampling.LANCZOS)
-    fg = _grade(fg)
-    top_y = int(canvas_h * 0.17) + (box_h - fg.height) // 2
-    bg.paste(fg, ((canvas_w - fg.width) // 2, top_y))
+
+
+def _keyline(bg: Image.Image, box: tuple[int, int, int, int],
+             color: tuple[int, int, int]) -> None:
+    """Thin, consistent studio accent keyline around one panel."""
+    x0, y0, x1, y1 = box
+    ImageDraw.Draw(bg).rectangle([x0, y0, x1 - 1, y1 - 1], outline=color, width=2)
+
+
+def bake_still(item: dict, canvas_w: int, canvas_h: int, variant: int = 0) -> Image.Image:
+    """Single-source fallback: one photo studio-tiled edge to edge.
+
+    The old contain-fit left a large empty blurred band. Reusing
+    ``layout_boxes`` keeps the same full-frame studio wall even when only one
+    source is available; panels still come from native crops via ``panel_tile``.
+    """
+    src = item["image"]
+    bg = _studio_backdrop(src, canvas_w, canvas_h)
+    _, boxes = layout_boxes(canvas_w, canvas_h, variant)
+    for i, (x0, y0, x1, y1) in enumerate(boxes):
+        bg.paste(_grade(panel_tile(src, x1 - x0, y1 - y0)), (x0, y0))
+        _keyline(bg, (x0, y0, x1, y1), ACCENTS[i % len(ACCENTS)])
     return _scrim(bg, canvas_w, canvas_h)
 
 
 def bake_collage(items: list[dict], canvas_w: int, canvas_h: int,
                  variant: int = 0) -> Image.Image:
-    """Bake a multi-panel still; ``variant`` is the shot index (not a modulo).
+    """Bake a multi-panel studio still; ``variant`` is the shot index (not a modulo).
 
     Sources rotate with the shot index as well, so neither the framing nor the
-    lead picture repeats on consecutive shots.
+    lead picture repeats on consecutive shots. Panels fill the frame; the
+    blurred base is visible only in the slim gutters between them.
     """
     if not items:
         raise ValueError("bake_collage needs at least one source image")
     _, boxes = layout_boxes(canvas_w, canvas_h, variant)
     base = items[variant % len(items)]["image"]
-    bg = _grade(ImageEnhance.Brightness(
-        _cover(base, canvas_w, canvas_h).filter(ImageFilter.GaussianBlur(46))).enhance(0.42))
+    bg = _studio_backdrop(base, canvas_w, canvas_h)
 
     for i, (x0, y0, x1, y1) in enumerate(boxes):
         src = items[(variant + i) % len(items)]["image"]
         tile = _grade(panel_tile(src, x1 - x0, y1 - y0))
         bg.paste(tile, (x0, y0))
-        draw = ImageDraw.Draw(bg)
-        draw.rectangle([x0, y0, x1 - 1, y1 - 1], outline=ACCENTS[i % len(ACCENTS)], width=3)
+        _keyline(bg, (x0, y0, x1, y1), ACCENTS[i % len(ACCENTS)])
     return _scrim(bg, canvas_w, canvas_h)
 
 

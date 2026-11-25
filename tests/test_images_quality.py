@@ -8,7 +8,7 @@ from __future__ import annotations
 import io
 import random
 
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageStat
 
 import pipeline.images as imgs
 
@@ -135,25 +135,51 @@ def test_source_priority_and_og_image_are_respected(monkeypatch):
 
 # --- panel geometry ------------------------------------------------------------
 
+def _empty_band_rows(boxes: list[tuple[int, int, int, int]],
+                     w: int, h: int, min_uncovered: float = 0.10) -> int:
+    """Longest run of rows where >=10% of the width is plain background."""
+    bad = []
+    for y in range(h):
+        covered = 0
+        for x0, y0, x1, y1 in boxes:
+            if y0 <= y < y1:
+                covered += max(0, min(x1, w) - max(x0, 0))
+        if (w - covered) / w >= min_uncovered:
+            bad.append(y)
+    longest = run = 0
+    previous = -2
+    for y in bad:
+        run = run + 1 if y == previous + 1 else 1
+        longest = max(longest, run)
+        previous = y
+    return longest
+
+
 def test_layout_templates_cycle_without_repeating_and_keep_panels_large():
+    """Studio wall: edge-to-edge panels, no empty band, every panel >= 25%."""
     seen = []
     for idx in range(9):
         name, boxes = imgs.layout_boxes(1080, 1920, idx)
         assert name == imgs.LAYOUTS[idx % 4]
-        assert len(boxes) >= 3
+        assert 3 <= len(boxes) <= 4
         areas = [(x1 - x0) * (y1 - y0) for x0, y0, x1, y1 in boxes]
-        assert min(areas) / sum(areas) >= 0.25 - 1e-9, (name, areas)
-        stage = max(b[2] for b in boxes) - min(b[0] for b in boxes)
-        stage *= max(b[3] for b in boxes) - min(b[1] for b in boxes)
-        assert min(areas) / stage >= 0.25 - 1e-9, (name, areas, stage)
+        total = sum(areas)
+        assert min(areas) / total >= 0.25 - 1e-9, (name, areas)
+        # Safe margins: every panel stays strictly inside the canvas.
         for x0, y0, x1, y1 in boxes:
             assert 0 <= x0 < x1 <= 1080 and 0 <= y0 < y1 <= 1920
-            assert y0 >= 0.15 * 1920 and y1 <= 0.55 * 1920  # graphics/caption space
         for i, a in enumerate(boxes):
             for b in boxes[i + 1:]:
                 overlap = max(0, min(a[2], b[2]) - max(a[0], b[0])) * \
                           max(0, min(a[3], b[3]) - max(a[1], b[1]))
                 assert overlap == 0, (name, a, b)
+        # Full-height, full-frame coverage with no sizeable empty band.
+        rows = set()
+        for x0, y0, x1, y1 in boxes:
+            rows.update(range(y0, y1))
+        assert len(rows) / 1920 >= 0.70, name
+        assert total / (1080 * 1920) >= 0.80, name
+        assert _empty_band_rows(boxes, 1080, 1920) <= 0.12 * 1920, name
         seen.append(tuple(boxes))
     assert len(set(seen[:4])) == 4
 
@@ -185,9 +211,12 @@ def test_baked_stills_are_1080x1920_rgb_high_quality_with_accent_borders():
         _, boxes = imgs.layout_boxes(1080, 1920, idx)
         x0, y0, _, _ = boxes[0]
         assert still.getpixel((x0 + 1, y0 + 1)) == imgs.ACCENTS[0]
-        # The top band is deliberately quiet negative space for graphics.
-        top = still.crop((0, 0, 1080, 300)).resize((1, 1)).getpixel((0, 0))
-        assert sum(top) / 3 < 110
+        # The studio wall reaches both edges: neither is a dark empty band,
+        # and the light scrim keeps the bottom panels readable.
+        top = ImageStat.Stat(still.crop((0, 0, 1080, 300))).mean
+        bottom = ImageStat.Stat(still.crop((0, 1600, 1080, 1920))).mean
+        assert sum(top) / 3 > 45
+        assert sum(bottom) / 3 > 35
 
 
 def test_bake_collage_changes_framing_on_consecutive_shots():

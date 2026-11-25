@@ -255,16 +255,18 @@ def write_project(workdir: str | Path, story: dict, voice: dict, captions: list[
     # Each graphic is a .clip host; every GSAP tween below targets an inner
     # wrapper only (never the .clip itself) so Studio stays editable and the
     # lint rule gsap_animates_clip_element cannot fire.
-    headline = _fit_copy(story["headline"], 58)
+    # The old always-on red "ब्रेकिंग" strip is gone.  A slim masthead in the
+    # platform-safe top margin carries brand / LIVE / kicker instead; the
+    # urgency beat is a single full-screen card in the middle of the reel.
+    headline = _fit_copy(story["headline"], 30)
     ticker = " • ".join(_ticker_phrases(story))
-    graphics_markup = f'''<div id="breakingbar" class="clip" data-start="0" data-duration="{duration}"
+    graphics_markup = f'''<div id="masthead" class="clip" data-start="0" data-duration="{duration}"
       data-track-index="2" style="z-index:70">
-      <div class="breaking-band">
-        <div id="breakinginner" class="breaking-inner">
-          <span id="breakingtag" class="breaking-tag">{_esc(ui['breaking'])}</span>
-          <span class="breaking-rule"></span>
-          <span id="breakingtext" class="breaking-text">{_esc(ui['kicker'])}</span>
-          <span id="breakingbrand" class="breaking-brand">{_esc(ui['brand'])}</span>
+      <div class="masthead-band">
+        <div id="mastheadinner" class="masthead-inner">
+          <span id="mastheadbrand" class="masthead-brand">{_esc(ui['brand'])}</span>
+          <span id="mastheadlive" class="masthead-live"><span class="masthead-dot"></span>LIVE</span>
+          <span id="mastheadkicker" class="masthead-kicker">{_esc(ui['kicker'])}</span>
         </div>
       </div>
     </div>
@@ -299,6 +301,35 @@ def write_project(workdir: str | Path, story: dict, voice: dict, captions: list[
       <div id="progressbar" class="progress-bar"></div>
     </div>'''
 
+    # ---- one full-screen mid-roll breaking card ----
+    # Exactly one card per reel, timed at 45% of the runtime (inside the
+    # required 35-60% window).  The host is a plain .clip whose geometry is
+    # inset:0; only its children are animated, and its z-index sits above the
+    # captions sub-composition so words never render on top of the card.
+    breaking_duration = 2.6
+    breaking_start = round(duration * 0.45, 2)
+    breaking_in = round(breaking_start + 0.12, 2)
+    breaking_exit = round(breaking_start + breaking_duration - 0.42, 2)
+    breaking_headline = _fit_copy(story["headline"], 46)
+    breaking_markup = f'''<div id="breakingcard" class="clip breaking-card"
+      data-start="{breaking_start}" data-duration="{breaking_duration}"
+      data-track-index="9" style="z-index:95" data-layout-allow-occlusion>
+      <div id="breakingfield" class="breaking-field">
+        <div id="breakingframe" class="breaking-frame"></div>
+        <div id="breakingdiag" class="breaking-diag"></div>
+        <div id="breakinginner" class="breaking-inner">
+          <div id="breakinglabel" class="breaking-label">{_esc(ui['breaking'])}</div>
+          <div id="breakingrule" class="breaking-rule"></div>
+          <div id="breakingheadline" class="breaking-headline">{_esc(breaking_headline)}</div>
+          <div id="breakingkicker" class="breaking-kicker">{_esc(ui['brand'])}</div>
+        </div>
+        <div id="breakingstripes" class="breaking-stripes"></div>
+        <div id="breakingtape" class="breaking-tape">{_esc(ui['ticker_label'])} &nbsp;•&nbsp; {_esc(ui['brand'])}</div>
+        <div id="breakingflash" class="breaking-flash"></div>
+        <div id="breakingpulse" class="breaking-pulse"></div>
+      </div>
+    </div>'''
+
     # ---- caption host ----
     caption_host = f'''<div id="captions" data-composition-id="captions"
       data-composition-src="compositions/captions.html" data-start="0"
@@ -328,9 +359,47 @@ def write_project(workdir: str | Path, story: dict, voice: dict, captions: list[
     # One subtle lower-third highlight pulse per reel, on a child element only.
     pulse_at = round(min(max(0.0, duration - 1.6),
                          max(1.2, shot_len * 4 + 0.12)), 2)
+    # Every breaking-card tween targets a child wrapper of the .clip host.
+    # clip-path wipe + diagonal sheen + scale/opacity entrance, a yellow flash
+    # bar and one quick pulse, then a clean scale/clip exit inside the same
+    # 2.6 s window.  immediateRender keeps all "from" states true at seek(0).
+    breaking_js = [
+        'tl.fromTo("#breakingfield", {clipPath:"inset(0 100% 0 0)"}, '
+        '{clipPath:"inset(0 0% 0 0)",duration:0.3,ease:"power4.inOut",'
+        f'immediateRender:true}}, {breaking_start});',
+        'tl.fromTo("#breakingdiag", {x:-260}, '
+        '{x:260,duration:2.2,ease:"none",immediateRender:true}, '
+        f'{breaking_start});',
+        'tl.fromTo("#breakingflash", {scaleX:0,opacity:1}, '
+        '{scaleX:1,opacity:0,duration:0.42,ease:"power2.out"}, '
+        f'{round(breaking_start + 0.02, 2)});',
+        'tl.fromTo("#breakinginner", {scale:0.88,opacity:0,y:34}, '
+        '{scale:1,opacity:1,y:0,duration:0.42,ease:"power3.out"}, '
+        f'{breaking_in});',
+        'tl.fromTo("#breakingrule", {scaleX:0}, '
+        '{scaleX:1,duration:0.3,ease:"power3.out"}, '
+        f'{round(breaking_in + 0.16, 2)});',
+        'tl.fromTo("#breakingpulse", {opacity:0}, '
+        '{opacity:0.9,duration:0.1,ease:"power2.out",immediateRender:true}, '
+        f'{round(breaking_in + 0.2, 2)});',
+        'tl.to("#breakingpulse", {opacity:0,duration:0.24,ease:"power2.in"}, '
+        f'{round(breaking_in + 0.32, 2)});',
+        'tl.fromTo("#breakingstripes", {scaleX:0}, '
+        '{scaleX:1,duration:0.4,ease:"power3.out"}, '
+        f'{breaking_start});',
+        'tl.fromTo("#breakingtape", {y:80,opacity:0}, '
+        '{y:0,opacity:1,duration:0.38,ease:"power3.out"}, '
+        f'{round(breaking_in + 0.08, 2)});',
+        'tl.to("#breakinginner", {opacity:0,scale:1.04,duration:0.32,'
+        f'ease:"power2.in"}}, {breaking_exit});',
+        'tl.to("#breakingfield", {clipPath:"inset(0 0 0 100%)",'
+        'duration:0.34,ease:"power4.inOut"}, '
+        f'{round(breaking_start + breaking_duration - 0.36, 2)});',
+    ]
+
     audio_js = "\n".join([
-        f'tl.fromTo("#breakinginner", {{y:-46,opacity:0}}, '
-        f'{{y:0,opacity:1,duration:0.45,ease:"power4.out"}}, 0.05);',
+        f'tl.fromTo("#mastheadinner", {{y:-28,opacity:0}}, '
+        f'{{y:0,opacity:1,duration:0.4,ease:"power4.out"}}, 0.08);',
         f'tl.fromTo("#hookinner", {{opacity:0,filter:"blur(10px)",scale:0.96}}, '
         f'{{opacity:1,filter:"blur(0px)",scale:1,duration:0.4,ease:"power4.out"}}, 0.12);',
         f'tl.fromTo("#hookrule", {{scaleX:0}}, '
@@ -349,9 +418,9 @@ def write_project(workdir: str | Path, story: dict, voice: dict, captions: list[
         f'{round(pulse_at + 0.16, 2)});',
         f'tl.to("#lowerpanel", {{opacity:0,y:-18,duration:0.7,ease:"power2.in"}}, {outro_at});',
         f'tl.to("#tickerinner", {{opacity:0,y:18,duration:0.6,ease:"power2.in"}}, {outro_at});',
-        f'tl.to("#breakinginner", {{opacity:0,y:-18,duration:0.55,ease:"power2.in"}}, {outro_at});',
+        f'tl.to("#mastheadinner", {{opacity:0,y:-16,duration:0.5,ease:"power2.in"}}, {outro_at});',
         f'tl.to("#bugpanel", {{opacity:0,y:-14,duration:0.5,ease:"power2.in"}}, {outro_at});',
-    ] + tweens + dip_tweens)
+    ] + breaking_js + tweens + dip_tweens)
 
     index_html = f'''<!doctype html>
 <html lang="en">
@@ -379,23 +448,59 @@ html,body{{width:{width}px;height:{height}px;overflow:hidden;background:#05070D}
   text-shadow:0 6px 26px rgba(0,0,0,.95);color:#fff}}
 .hook-rule{{height:6px;width:180px;margin:22px auto 0;border-radius:3px;
   background:var(--news-yellow);transform-origin:center center}}
-/* Breaking-news band: navy field, red accent rule, yellow keyline */
-.breaking-band{{position:absolute;left:0;right:0;top:288px;height:90px;
-  background:linear-gradient(90deg,var(--news-navy) 0%,rgba(10,15,30,.95) 70%,rgba(10,15,30,.6) 100%);
-  border-top:3px solid var(--news-red);border-bottom:3px solid var(--news-yellow);
-  box-shadow:0 12px 30px rgba(0,0,0,.55)}}
-.breaking-inner{{position:absolute;left:150px;right:250px;top:0;height:100%;
-  display:flex;align-items:center;gap:16px;white-space:nowrap}}
-.breaking-tag{{background:var(--news-red);color:#fff;font-size:30px;font-weight:900;letter-spacing:.06em;
-  padding:8px 14px;border-radius:4px;box-shadow:0 3px 14px rgba(225,29,46,.55)}}
-.breaking-rule{{width:3px;height:38px;background:var(--news-yellow);flex:none}}
-.breaking-text{{font-size:32px;font-weight:800;letter-spacing:.03em;color:#fff;
+/* Slim top masthead -- brand / LIVE / kicker, inside the platform-safe
+   margin.  Deliberately a compact pill, not a full-width red strip. */
+.masthead-band{{position:absolute;left:120px;right:300px;top:300px;height:66px;
+  background:rgba(10,15,30,.9);border-top:3px solid var(--news-red);
+  border-bottom:2px solid rgba(255,230,0,.6);box-shadow:0 8px 24px rgba(0,0,0,.5)}}
+.masthead-inner{{position:absolute;left:20px;right:20px;top:0;height:100%;
+  display:flex;align-items:center;gap:18px;white-space:nowrap}}
+.masthead-brand{{font-size:32px;font-weight:900;color:#fff;text-shadow:0 3px 10px #000}}
+.masthead-live{{font-size:28px;font-weight:900;letter-spacing:.08em;color:#fff}}
+.masthead-dot{{display:inline-block;width:12px;height:12px;margin-right:8px;border-radius:50%;
+  background:var(--news-red);box-shadow:0 0 10px var(--news-red)}}
+.masthead-kicker{{margin-left:auto;font-size:28px;font-weight:800;color:var(--news-yellow);
   text-shadow:0 3px 10px #000}}
-.breaking-brand{{margin-left:auto;font-size:30px;font-weight:900;letter-spacing:.04em;
-  color:var(--news-yellow);text-shadow:0 3px 10px #000}}
+
+/* One full-screen mid-roll breaking card.  The .clip host is never animated;
+   every move below is on a child wrapper. */
+.breaking-card{{position:absolute;inset:0;overflow:hidden;pointer-events:none}}
+.breaking-field{{position:absolute;inset:0;will-change:clip-path;
+  background:linear-gradient(135deg,#87000F 0%,#C30D22 48%,#87000F 100%)}}
+.breaking-frame{{position:absolute;left:60px;right:60px;top:120px;bottom:120px;
+  border:2px solid rgba(255,230,0,.55)}}
+.breaking-diag{{position:absolute;inset:-20%;will-change:transform;
+  background:linear-gradient(115deg,rgba(255,255,255,0) 42%,
+    rgba(255,255,255,.14) 50%,rgba(255,255,255,0) 58%)}}
+.breaking-inner{{position:absolute;left:80px;right:80px;top:520px;text-align:center;
+  will-change:transform,opacity}}
+.breaking-label{{font-size:124px;font-weight:900;letter-spacing:.04em;color:#fff;
+  text-shadow:0 8px 34px rgba(0,0,0,.9),0 0 5px #000}}
+.breaking-rule{{width:260px;height:9px;margin:26px auto 30px;border-radius:5px;
+  background:var(--news-yellow);transform-origin:center center}}
+.breaking-headline{{font-size:56px;font-weight:900;line-height:1.18;color:#fff;
+  text-shadow:0 5px 20px rgba(0,0,0,.9),0 0 3px #000;overflow-wrap:anywhere}}
+.breaking-kicker{{margin-top:34px;font-size:32px;font-weight:800;letter-spacing:.1em;
+  color:var(--news-yellow);text-shadow:0 3px 12px #000}}
+/* Broadcast caution tape fills the lower third of the card so a full-screen
+   beat never reads as an empty red field. Flash/pulse sit below the copy —
+   never through the headline. */
+.breaking-stripes{{position:absolute;left:0;right:0;bottom:92px;height:20px;
+  background:repeating-linear-gradient(135deg,var(--news-yellow) 0 20px,
+    var(--news-navy) 20px 40px);transform-origin:left center}}
+.breaking-tape{{position:absolute;left:0;right:0;bottom:0px;height:92px;
+  background:var(--news-navy);border-top:4px solid var(--news-yellow);
+  display:flex;align-items:center;justify-content:center;
+  font-size:32px;font-weight:900;letter-spacing:.12em;
+  color:var(--news-yellow);text-shadow:0 3px 12px #000}}
+.breaking-flash{{position:absolute;left:0;right:0;top:1080px;height:16px;opacity:0;
+  background:var(--news-yellow);transform-origin:left center;
+  box-shadow:0 0 34px var(--news-yellow)}}
+.breaking-pulse{{position:absolute;left:0;right:0;top:1072px;height:32px;opacity:0;
+  border-top:2px solid var(--news-yellow);border-bottom:2px solid var(--news-yellow)}}
 
 /* Persistent channel bug with LIVE indicator */
-.bug-panel{{position:absolute;top:758px;right:300px;width:196px;height:72px;
+.bug-panel{{position:absolute;top:660px;right:230px;width:196px;height:72px;
   background:rgba(10,15,30,.92);border:2px solid var(--news-red);border-radius:6px;
   display:flex;align-items:center;gap:12px;padding:0 12px;box-shadow:0 8px 24px rgba(0,0,0,.6)}}
 .bug-mark{{width:46px;height:46px;border-radius:4px;background:var(--news-red);color:#fff;
@@ -404,28 +509,28 @@ html,body{{width:{width}px;height:{height}px;overflow:hidden;background:#05070D}
 .bug-dot{{display:inline-block;width:14px;height:14px;margin-right:7px;border-radius:50%;
   background:var(--news-red);box-shadow:0 0 12px var(--news-red)}}
 
-/* Lower-third: thin coloured rule, label tab and bounded headline */
-.lower-panel{{position:absolute;left:150px;right:300px;top:866px;min-height:130px;
+/* Lower-third: thin coloured rule, label tab and confident bounded headline */
+.lower-panel{{position:absolute;left:120px;right:300px;top:780px;min-height:148px;
   background:linear-gradient(100deg,rgba(10,15,30,.96),rgba(10,15,30,.78));
   border-top:5px solid var(--news-yellow);border-left:7px solid var(--news-red);
   box-shadow:0 -10px 34px rgba(0,0,0,.55);padding:16px 18px 14px 20px}}
 .lower-label{{display:inline-block;background:var(--news-red);color:#fff;font-size:28px;font-weight:900;
   letter-spacing:.08em;padding:5px 12px;border-radius:3px;margin-bottom:10px}}
-.lower-inner{{font-size:32px;font-weight:800;line-height:1.18;color:#fff;
+.lower-inner{{font-size:44px;font-weight:900;line-height:1.16;color:#fff;
   text-shadow:0 3px 10px #000;overflow-wrap:anywhere}}
 /* One-beat highlight pulse on the lower-third (child only, starts hidden). */
 .lower-pulse{{position:absolute;left:0;bottom:0;height:6px;width:100%;
   background:var(--news-yellow);opacity:0;transform-origin:left center}}
 
 /* Ticker strip: short phrases taken from the script itself */
-.ticker-band{{position:absolute;left:0;right:0;top:1188px;height:54px;
+.ticker-band{{position:absolute;left:0;right:0;top:1184px;height:60px;
   background:rgba(5,7,13,.9);border-top:2px solid var(--news-red);
   border-bottom:2px solid rgba(255,230,0,.55)}}
-.ticker-inner{{position:absolute;left:150px;right:300px;top:0;height:100%;
+.ticker-inner{{position:absolute;left:120px;right:300px;top:0;height:100%;
   display:flex;align-items:center;gap:14px;white-space:nowrap}}
-.ticker-label{{font-size:28px;font-weight:900;letter-spacing:.06em;color:var(--news-yellow);flex:none}}
+.ticker-label{{font-size:30px;font-weight:900;letter-spacing:.06em;color:var(--news-yellow);flex:none}}
 .ticker-rule{{width:2px;height:28px;background:rgba(255,255,255,.4);flex:none}}
-.ticker-text{{font-size:30px;font-weight:700;color:#fff;text-shadow:0 2px 8px #000}}
+.ticker-text{{font-size:32px;font-weight:700;color:#fff;text-shadow:0 2px 8px #000}}
 
 .progress-track{{position:absolute;left:0;right:0;bottom:0;height:8px;background:rgba(255,255,255,.16)}}
 .progress-bar{{position:absolute;left:0;bottom:0;height:8px;width:100%;background:var(--news-yellow);
@@ -439,6 +544,7 @@ html,body{{width:{width}px;height:{height}px;overflow:hidden;background:#05070D}
 {chr(10).join(dip_markup)}
 {hook_markup}
 {graphics_markup}
+{breaking_markup}
 {caption_host}
 {chr(10).join(audio_markup)}
 </div>
@@ -495,9 +601,9 @@ tl.seek(0);
 <style>
 {font_faces}
 #root{{position:absolute;inset:0}}
-.cap-group{{position:absolute;left:150px;right:150px;bottom:740px;text-align:center;
-  overflow:visible;max-width:780px;margin:auto}}
-.cap-line{{font-family:{ui['font']};font-size:{52 if is_hi else 56}px;font-weight:900;
+.cap-group{{position:absolute;left:120px;right:120px;bottom:760px;text-align:center;
+  overflow:visible;max-width:840px;margin:auto}}
+.cap-line{{font-family:{ui['font']};font-size:{54 if is_hi else 58}px;font-weight:900;
   line-height:1.2;letter-spacing:-.015em;color:#FFFFFF;
   text-shadow:0 3px 12px rgba(0,0,0,.95),0 0 3px rgba(0,0,0,.9);
   background:rgba(0,0,0,.42);border-radius:18px;padding:10px 20px;

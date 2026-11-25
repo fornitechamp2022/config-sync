@@ -51,6 +51,9 @@ if alerts stop, reopen the site and subscribe again.
 
 ## Behaviour that matters later
 
+- Visual package: full-frame studio photo wall, slim masthead, and one
+  full-screen 2.6 s breaking card at 45% of runtime. Caption bands are centred
+  with 120 px side margins and yellow current-word highlight.
 - Cron can be delayed by a few minutes; acceptable. Delayed runs read the latest feed.
 - Failure alerts only (`if: failure()`); no success push. Failure alerting must
   never fail the job (`notify_failure.py` exits 0 on all errors).

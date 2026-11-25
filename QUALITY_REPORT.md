@@ -2,10 +2,9 @@
 
 **Verification status:** commit `43504c2` (Buffer provider, daily cap,
 unattended docs) passed CI run `45136814852` and is tagged
-**`verified-working`**; it is the rollback point. Iteration 12 (name change to
-**YT Bolly**, GitHub secret/variable provisioning) passed CI run
-`45159758735` and is now tagged **`verified-working`**. Offline suite:
-**219 passing tests**.
+**`verified-working`**; it is the rollback point. Iteration 13 (studio visual
+overhaul) is verified locally with a fresh render; CI verification pending.
+Offline suite: **239 passing tests**.
 
 ## Final acceptance criteria
 
@@ -26,6 +25,8 @@ unattended docs) passed CI run `45136814852` and is tagged
 | 13 | No credentials needed by the automation after setup: GitHub PAT unused (built-in `GITHUB_TOKEN`, `contents: read`), Netlify token long-lived and blob-only (no deploys), OneSignal key long-lived, alerts failure-only | **PASS** — secret inventory in SECURITY.md; notify step is `if: failure()` only |
 | 14 | Bounded retention: Netlify media blobs 7 days, GitHub artifacts 2 days, state records 30 days | **PASS** — `MEDIA_TTL_DAYS = 7`, workflow `retention-days: 2`, `STATE_TTL_DAYS = 30` |
 | 15 | Name is **YT Bolly**; all credentials are GitHub Secrets/variables, never literals in the workflow or logs | **PASS** — workflow name and notification strings updated; placeholder secrets provisioned via the GitHub API; keep-alive URL moved to `${{ vars.NETLIFY_SITE_URL }}`; workflow test asserts variable/secret references |
+| 16 | Studio stills: sharp panels fill the frame with no empty blurred band | **PASS** — 4 layouts cover 99.1–99.4% area / ~100% height, 6 px seams; real render has 0 of 20 flat horizontal bands (was 7) |
+| 17 | One full-screen mid-roll breaking animation with correct banners and captions | **PASS** — single 2.6 s card at 45% runtime, centred 124px label, 56px bounded headline, wipe + sheen + flash + tape (flash moved clear of copy); captions centred at 120px margins, 54px, 0 timeline errors; `hyperframes check` 0 errors, 50/50 contrast |
 
 ## Iterations
 
@@ -80,6 +81,23 @@ after the voice stops. Cause: `align_sentence_spans` gives each sentence an
 sync issue, not an audio defect — speech, loudness and peak are good. Left
 as-is deliberately: changing word distribution would invalidate timing tests
 and alter a verified render.
+
+13. **Studio visual overhaul (parallel agents + reviewer fixes)** — the old
+    collage confined sharp photos to y=17–53%, leaving a flat blurred lower
+    half; a red "ब्रेकिंग" strip hovered over every frame. `pipeline/images.py`
+    now paints a four-variant studio wall edge to edge (≥99% area, ~100%
+    height, 6 px seams, light 22% caption scrim, no upscaling).
+    `pipeline/project.py` removes the hovering strip, adds a slim masthead and
+    **one** full-screen mid-roll breaking card at 45% of the runtime (2.6 s,
+    wipe + diagonal sheen + yellow flash + caution tape + animated exit), and
+    re-sizes the lower-third (44px), ticker (32px) and captions (54px,
+    centred). Reviewer fixes during verification: caption band re-centred to
+    equal 120px margins; card copy re-centred and enlarged; flash bar moved
+    below the headline; navy/yellow caution tape added so the card is not an
+    empty red field. Added 20 focused tests (239 total). **PASS** locally:
+    `hyperframes check` passed with 0 lint/runtime/layout/motion errors and
+    50/50 text checks meeting WCAG AA; rendered 43.24 s sample has 0 flat
+    horizontal bands versus 7 before.
 
 ### Iteration 7 acceptance criteria and status (historical)
 

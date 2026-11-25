@@ -92,17 +92,23 @@ def test_news_ui_elements_exist(project):
     html = project["index"]
     expected = [
         "hookcard", "hookinner", "hookrule",
-        "breakingbar", "breakinginner", "breakingtag", "breakingtext", "breakingbrand",
+        "masthead", "mastheadinner", "mastheadbrand", "mastheadlive", "mastheadkicker",
         "channelbug", "bugpanel", "bugmark", "buglive",
         "lowerthird", "lowerpanel", "lowerlabel", "lowerinner",
         "ticker", "tickerinner", "tickerlabel", "tickertext",
-        "progress", "progressbar", "captions",
+        "progress", "progressbar",
+        "breakingcard", "breakingfield", "breakingframe", "breakingdiag",
+        "breakinginner", "breakinglabel", "breakingrule", "breakingheadline",
+        "breakingkicker", "breakingflash", "breakingpulse",
+        "captions",
     ]
     for element_id in expected:
         assert f'id="{element_id}"' in html, f"missing #{element_id}"
+    # The hovering always-on red strip is gone for good.
+    assert "breakingbar" not in html
 
     duration = project["result"]["duration"]
-    for host in ("breakingbar", "channelbug", "lowerthird", "ticker", "progress"):
+    for host in ("masthead", "channelbug", "lowerthird", "ticker", "progress"):
         block = re.search(rf'<div id="{host}"[^>]*>', html).group(0)
         assert 'class="clip' in block
         assert 'data-start="0"' in block
@@ -139,11 +145,16 @@ def test_palette_and_minimum_text_size(project):
 def test_caption_band_keeps_safe_zone_geometry(project):
     caps = project["caps"]
     group_css = re.search(r"\.cap-group\{([^}]+)\}", caps).group(1)
-    assert "left:150px" in group_css
-    assert "right:150px" in group_css
-    assert "bottom:740px" in group_css
+    # Captions are centred in the 1080px frame (equal 120px side margins),
+    # not biased towards the left like the lower-third banner.
+    assert "left:120px" in group_css
+    assert "right:120px" in group_css
+    assert "max-width:840px" in group_css
+    assert "bottom:760px" in group_css
     assert ".cap-line" in caps
-    assert 'font-size:' in caps
+    line_css = re.search(r"\.cap-line\{([^}]+)\}", caps).group(1)
+    cap_size = int(re.search(r"font-size:(\d+)px", line_css).group(1))
+    assert cap_size >= 52, cap_size
     assert min(int(v) for v in re.findall(r"font-size:(\d+)px", caps)) >= 28
 
 
@@ -185,7 +196,7 @@ def test_no_display_autoalpha_tweens_and_visibility_only_on_children(project):
 # --------------------------------------------------------------------------- #
 def test_intro_and_outro_use_absolute_times(project):
     js = project["index"]
-    for target, time in (("breakinginner", "0.05"), ("hookrule", "0.22"),
+    for target, time in (("mastheadinner", "0.08"), ("hookrule", "0.22"),
                          ("bugpanel", "0.34"), ("lowerpanel", "0.46"),
                          ("tickerinner", "0.56")):
         assert re.search(rf'tl\.fromTo\("#{target}"', js), f"missing #{target} tween"
