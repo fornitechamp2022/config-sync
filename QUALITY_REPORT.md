@@ -3,8 +3,8 @@
 **Verification status:** commit `43504c2` (Buffer provider, daily cap,
 unattended docs) passed CI run `45136814852` and is tagged
 **`verified-working`**; it is the rollback point. Iteration 13 (studio visual
-overhaul) is verified locally with a fresh render; CI verification pending.
-Offline suite: **239 passing tests**.
+overhaul) passed CI run `45569749928` (41.5 MB MP4 artifact) and is now tagged
+**`verified-working`**. Offline suite: **239 passing tests**.
 
 ## Final acceptance criteria
 
